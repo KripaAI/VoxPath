@@ -21,6 +21,7 @@ from logging_config import setup_logging, get_logger, new_trace_id, redact
 from mcp_server import mcp
 import agent
 import auth
+import db_pool
 import news_scheduler
 import ratelimit
 import tracing
@@ -75,7 +76,9 @@ async def lifespan(app: FastAPI):
                     database_url,
                     min_size=int(os.getenv("DB_POOL_MIN_SIZE", "1")),
                     max_size=int(os.getenv("DB_POOL_MAX_SIZE", "10")),
-                    check=AsyncConnectionPool.check_connection,  # Neon drops idle connections; test before handing one out
+                    # Neon drops idle connections; ping only ones idle >60 s (see db_pool.py)
+                    check=db_pool.check_if_idle,
+                    reset=db_pool.mark_returned,
                     open=False,
                     kwargs={
 

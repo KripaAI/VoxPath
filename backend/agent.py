@@ -253,6 +253,12 @@ async def _build_agent():
             )
         lc_tools.append(lc_tool)
     llm = services.build_llm()
+    # History trimming counts tokens before every model call. The first count in a
+    # process loads the tokenizer (~1 s); do it now rather than in a user's chat.
+    try:
+        llm.get_num_tokens_from_messages([HumanMessage(content="warm up")])
+    except Exception as error:
+        log.debug("tokenizer warm-up skipped: %s", error)
     log.info("LangGraph agent built with %d MCP tools", len(lc_tools))
     return create_react_agent(
         llm,
@@ -285,8 +291,12 @@ async def agent_chat(
         }
     }
     with tracing.trace_context(config["configurable"]["thread_id"], config["configurable"]["user_id"]):
+        # durability="exit": save the conversation once when the turn finishes rather
+        # than after every graph step. Each save is a round trip to the remote
+        # database, and per-step saves cost ~2 s of a chat turn; the stored
+        # history is the same. A crash mid-turn loses only that unfinished turn.
         result = await _agent.ainvoke(
-            {"messages": [HumanMessage(content=message)]}, config=config
+            {"messages": [HumanMessage(content=message)]}, config=config, durability="exit"
         )
     final = result["messages"][-1]
     content = final.content

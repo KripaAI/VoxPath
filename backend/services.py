@@ -1,6 +1,6 @@
 import os
 import re
-from typing import Any
+from typing import Any, Iterator
 
 import yfinance as yf
 from dotenv import load_dotenv
@@ -139,34 +139,43 @@ def _price_for_symbol(symbol: str) -> float | None:
     return None
 
 
-def _candidate_symbols(query: str) -> list[str]:
+def _candidate_symbols(query: str) -> Iterator[str]:
     """Resolve a company name or ticker to ordered Yahoo symbol candidates.
 
     Uses Yahoo search so any listed company works (and so ticker changes like
     TATAMOTORS -> TMCV/TMPV resolve to the current symbol), preferring NSE then BSE.
+
+    A generator: get_stock_price stops at the first candidate with a price, so the
+    Yahoo search (~1.3 s) only runs when no NSE match could be priced.
     """
     q = query.strip()
-    candidates = []
+    seen: set[str] = set()
+    listed = False
+
+    def fresh(symbols):
+        nonlocal listed
+        for symbol in symbols:
+            if symbol not in seen:
+                seen.add(symbol)
+                listed = listed or symbol.endswith((".NS", ".BO"))
+                yield symbol
+
     if q.endswith((".NS", ".BO")) or q.startswith("^"):
-        candidates.append(q)
+        yield from fresh([q])
 
+    yield from fresh(f"{sym}.NS" for sym in stock_resolver.nse_matches(q))
 
-    candidates += [f"{sym}.NS" for sym in stock_resolver.nse_matches(q)]
-
-
+    quotes = []
     try:
         quotes = yf.Search(q).quotes
-        candidates += [r["symbol"] for r in quotes if r.get("symbol", "").endswith(".NS")]
-        candidates += [r["symbol"] for r in quotes if r.get("symbol", "").endswith(".BO")]
     except Exception as error:
         log.debug("symbol search failed for %r: %s", q, error)
+    yield from fresh([r["symbol"] for r in quotes if r.get("symbol", "").endswith(".NS")])
+    yield from fresh([r["symbol"] for r in quotes if r.get("symbol", "").endswith(".BO")])
 
     token = q.upper().replace(" ", "")
-    if token and not any(c.endswith((".NS", ".BO")) for c in candidates):
-        candidates += [f"{token}.NS", f"{token}.BO"]
-
-    seen = set()
-    return [c for c in candidates if not (c in seen or seen.add(c))]
+    if token and not listed:
+        yield from fresh([f"{token}.NS", f"{token}.BO"])
 
 
 def get_stock_price(query: str) -> str:

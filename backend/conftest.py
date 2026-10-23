@@ -43,7 +43,7 @@ class FakeDB:
         self.threads: dict[str, str] = {}  # thread_id -> owner_id
         self.hide_existing_emails = False
 
-    async def execute(self, sql, params=()):
+    async def execute(self, sql, params: tuple = ()):
         s = " ".join(sql.split())
         if s.startswith("CREATE TABLE"):
             return _Cursor(None)
@@ -58,14 +58,11 @@ class FakeDB:
             return _Cursor(None)
         if s.startswith("SELECT id, password_hash FROM users WHERE email"):
             return _Cursor(self.users.get(params[0]))
-        if s.startswith("SELECT owner_id FROM threads"):
-            owner = self.threads.get(params[0])
-            return _Cursor({"owner_id": owner} if owner else None)
-        if s.startswith("INSERT INTO threads"):
-            self.threads.setdefault(params[0], params[1])
-            return _Cursor(None)
-        if s.startswith("UPDATE threads"):
-            return _Cursor(None)
+        if s.startswith("INSERT INTO threads") and "RETURNING owner_id" in s:
+            # Upsert that only succeeds for the thread's owner (see auth.claim_thread).
+            thread_id, user_id = params
+            owner = self.threads.setdefault(thread_id, user_id)
+            return _Cursor({"owner_id": owner} if owner == user_id else None)
         raise AssertionError(f"FakeDB got unexpected SQL: {s}")
 
 

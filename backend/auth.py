@@ -236,19 +236,19 @@ async def claim_thread(thread_id: str, user: User) -> None:
     confirm the thread exists, which is itself a small leak.
     """
     async with _pool.connection() as conn:
+        # One round trip: claim a new thread, or touch last_used on our own. When the
+        # thread belongs to someone else the WHERE fails and no row comes back. Being
+        # a single statement, two users racing to claim the same new thread can't
+        # both win (a separate SELECT-then-INSERT allowed that).
         row = await (
-            await conn.execute("SELECT owner_id FROM threads WHERE thread_id = %s", (thread_id,))
-        ).fetchone()
-        if row is None:
             await conn.execute(
-                "INSERT INTO threads (thread_id, owner_id) "
-                "VALUES (%s, %s) ON CONFLICT (thread_id) DO NOTHING",
+                "INSERT INTO threads (thread_id, owner_id) VALUES (%s, %s) "
+                "ON CONFLICT (thread_id) DO UPDATE SET last_used = now() "
+                "WHERE threads.owner_id = EXCLUDED.owner_id "
+                "RETURNING owner_id",
                 (thread_id, user.id),
             )
-            return
-        if row["owner_id"] != user.id:
-            log.warning("user %s tried to use thread owned by %s", user.id, row["owner_id"])
+        ).fetchone()
+        if row is None:
+            log.warning("user %s tried to use a thread owned by another user", user.id)
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Conversation not found.")
-        await conn.execute(
-            "UPDATE threads SET last_used = now() WHERE thread_id = %s", (thread_id,)
-        )
