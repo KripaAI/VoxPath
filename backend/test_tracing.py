@@ -38,10 +38,10 @@ def test_failed_tracing_setup_does_not_break_startup(monkeypatch):
     monkeypatch.setenv("PHOENIX_TRACING", "true")
     phoenix_otel = pytest.importorskip("phoenix.otel")  # only with requirements-tracing.txt
 
-    def broken_register(**kwargs):
+    def broken_provider(**kwargs):
         raise RuntimeError("collector misconfigured")
 
-    monkeypatch.setattr(phoenix_otel, "register", broken_register)
+    monkeypatch.setattr(phoenix_otel, "TracerProvider", broken_provider)
     assert tracing.setup_tracing() is False
 
 

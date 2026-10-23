@@ -40,7 +40,9 @@ def setup_tracing() -> bool:
     try:
         from openinference.instrumentation import TraceConfig
         from openinference.instrumentation.langchain import LangChainInstrumentor
-        from phoenix.otel import register
+        from phoenix.otel import PROJECT_NAME, BatchSpanProcessor, Resource, TracerProvider
+
+        from trace_view import ReadableTraceProcessor
     except ImportError:
         log.warning(
             "PHOENIX_TRACING=true but tracing packages are not installed; "
@@ -49,16 +51,21 @@ def setup_tracing() -> bool:
         return False
     try:
         endpoint = os.getenv("PHOENIX_COLLECTOR_ENDPOINT", "http://localhost:6006/v1/traces")
-        tracer_provider = register(
-            endpoint=endpoint,
-            project_name=os.getenv("PHOENIX_PROJECT_NAME", "voxpath"),
-            batch=True,  # export in the background so chats never wait on Phoenix
-            verbose=False,
-            # Not global: FastAPI and fastmcp emit spans for every request to a global
-            # provider, which would bury agent traces under /health polls (every 6 s).
-            set_global_tracer_provider=False,
-        )
         hide = not user_content_logging()
+        # Built by hand rather than with phoenix.otel.register() so the readable-trace
+        # processor can sit in front of the exporter. It is deliberately NOT the global
+        # provider: FastAPI and fastmcp emit spans for every request to a global
+        # provider, which would bury agent traces under /health polls (every 6 s).
+        tracer_provider = TracerProvider(
+            resource=Resource({PROJECT_NAME: os.getenv("PHOENIX_PROJECT_NAME", "voxpath")}),
+            verbose=False,
+        )
+        tracer_provider.add_span_processor(
+            ReadableTraceProcessor(
+                BatchSpanProcessor(endpoint=endpoint),  # background export: chats never wait on Phoenix
+                rewrite_root_io=not hide,
+            )
+        )
         config = TraceConfig(
             hide_inputs=hide,
             hide_outputs=hide,

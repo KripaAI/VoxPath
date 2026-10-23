@@ -1,5 +1,11 @@
 """Shared pytest fixtures for the VoxPath backend tests."""
 
+import os
+
+# Tests must never send traces to the developer's Phoenix, whatever backend/.env
+# says. Set before any test imports main (whose load_dotenv won't override it).
+os.environ["PHOENIX_TRACING"] = "false"
+
 from contextlib import asynccontextmanager
 
 import psycopg
