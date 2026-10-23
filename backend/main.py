@@ -23,6 +23,7 @@ import agent
 import auth
 import news_scheduler
 import ratelimit
+import tracing
 import services
 
 
@@ -43,6 +44,7 @@ if sys.stdout.encoding != "utf-8":
 
 setup_logging()
 log = get_logger("voxpath.api")
+tracing.setup_tracing()  # no-op unless PHOENIX_TRACING=true
 
 
 @asynccontextmanager

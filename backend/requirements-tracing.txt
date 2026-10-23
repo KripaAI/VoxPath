@@ -1,0 +1,11 @@
+# Optional: agent execution tracing with Arize Phoenix (PHOENIX_TRACING=true in .env).
+# Installs everything in requirements.txt plus the packages that send traces to
+# Phoenix. The Phoenix server/UI itself lives in its own environment (tracing/.venv)
+# so its dependencies can never conflict with the backend's.
+# Install with:  python -m pip install -r requirements-tracing.txt
+-r requirements.txt
+
+arize-phoenix-otel==0.17.2
+openinference-instrumentation-langchain==0.1.79
+openinference-instrumentation==0.1.71
+opentelemetry-sdk==1.45.1

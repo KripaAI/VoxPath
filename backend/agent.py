@@ -20,6 +20,7 @@ from langgraph.prebuilt import create_react_agent
 
 import memory
 import services
+import tracing
 from logging_config import get_logger, log_tool_call, log_tool_readable, redact
 from mcp_server import mcp
 
@@ -283,9 +284,10 @@ async def agent_chat(
             "user_id": user_id or memory.DEFAULT_USER_ID,
         }
     }
-    result = await _agent.ainvoke(
-        {"messages": [HumanMessage(content=message)]}, config=config
-    )
+    with tracing.trace_context(config["configurable"]["thread_id"], config["configurable"]["user_id"]):
+        result = await _agent.ainvoke(
+            {"messages": [HumanMessage(content=message)]}, config=config
+        )
     final = result["messages"][-1]
     content = final.content
     return content if isinstance(content, str) else str(content)
