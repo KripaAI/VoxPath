@@ -9,7 +9,7 @@ import main
 
 
 def _token(client):
-    return {"Authorization": f"Bearer {client.post('/auth/register', json={'email': 'a@example.com', 'password': 'password123'}).json()['access_token']}"}
+    return {"Authorization": f"Bearer {client.post('/auth/register', json={'username': 'alice', 'password': 'password123'}).json()['access_token']}"}
 
 
 def test_db_down_before_chat_runs_is_retryable(fake_db, monkeypatch):
@@ -33,7 +33,7 @@ def test_db_down_during_chat_is_not_auto_retryable(fake_db, monkeypatch):
     client = TestClient(main.app)
     headers = _token(client)
 
-    async def save_failed(message, thread_id=None, user_id=None):
+    async def save_failed(message, thread_id=None, user_id=None, username=None):
         raise psycopg.OperationalError("SSL connection has been closed unexpectedly")
 
     monkeypatch.setattr(agent, "agent_chat", save_failed)
@@ -58,7 +58,7 @@ def test_sign_in_with_db_down_gets_clear_503(fake_db, monkeypatch):
         raise PoolTimeout("couldn't get a connection after 15.00 sec")
 
     monkeypatch.setattr(fake_db, "execute", unreachable)
-    response = TestClient(main.app).post("/auth/login", json={"email": "a@example.com", "password": "password123"})
+    response = TestClient(main.app).post("/auth/login", json={"username": "alice", "password": "password123"})
     assert response.status_code == 503
     assert "can't reach its database" in response.json()["detail"]
 
@@ -69,7 +69,7 @@ def test_other_errors_are_still_500(fake_db, monkeypatch):
     client = TestClient(main.app)
     headers = _token(client)
 
-    async def bug(message, thread_id=None, user_id=None):
+    async def bug(message, thread_id=None, user_id=None, username=None):
         raise ValueError("something else broke")
 
     monkeypatch.setattr(agent, "agent_chat", bug)

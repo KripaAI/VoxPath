@@ -15,7 +15,8 @@ export function AuthGate({ children }: { children: (user: User, signOut: () => v
   const [user, setUser] = useState<User | null>(null);
   const [checking, setChecking] = useState(true);
   const [mode, setMode] = useState<'login' | 'register'>('login');
-  const [email, setEmail] = useState('');
+  const [username, setUsername] = useState(''); // sign-in: username or email
+  const [email, setEmail] = useState(''); // sign-up only, optional
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -29,6 +30,7 @@ export function AuthGate({ children }: { children: (user: User, signOut: () => v
   const signOut = useCallback(() => {
     clearSession();
     setUser(null);
+    setUsername('');
     setEmail('');
     setPassword('');
   }, []);
@@ -39,7 +41,8 @@ export function AuthGate({ children }: { children: (user: User, signOut: () => v
     setBusy(true);
     setError(null);
     try {
-      const submitted = mode === 'login' ? await login(email, password) : await register(email, password);
+      const submitted =
+        mode === 'login' ? await login(username, password) : await register(username, password, email);
       setUser(submitted);
       setPassword('');
     } catch (err) {
@@ -74,20 +77,47 @@ export function AuthGate({ children }: { children: (user: User, signOut: () => v
 
         <form onSubmit={onSubmit} className="mt-6 space-y-4">
           <div>
-            <label htmlFor="email" className="block text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-              Email
+            <label htmlFor="username" className="block text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+              {isRegister ? 'Username' : 'Username or email'}
             </label>
             <input
-              id="email"
-              type="email"
+              id="username"
+              type="text"
               required
-              autoComplete="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              autoComplete="username"
+              autoCapitalize="none"
+              spellCheck={false}
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              {...(isRegister
+                ? {
+                    minLength: 3,
+                    maxLength: 30,
+                    pattern: '[A-Za-z0-9][A-Za-z0-9._\\-]{2,29}',
+                    title: 'Username must be 3-30 characters: letters, numbers, dot, dash or underscore, starting with a letter or number.',
+                  }
+                : {})}
               className="mt-1.5 w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white outline-none placeholder:text-slate-500 focus:border-accent/60"
-              placeholder="you@example.com"
+              placeholder={isRegister ? 'e.g. krish' : 'krish or you@example.com'}
             />
           </div>
+
+          {isRegister && (
+            <div>
+              <label htmlFor="email" className="block text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                Email <span className="normal-case tracking-normal text-slate-500">(optional)</span>
+              </label>
+              <input
+                id="email"
+                type="email"
+                autoComplete="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="mt-1.5 w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white outline-none placeholder:text-slate-500 focus:border-accent/60"
+                placeholder="you@example.com"
+              />
+            </div>
+          )}
 
           <div>
             <label htmlFor="password" className="block text-[11px] font-semibold uppercase tracking-wider text-slate-400">

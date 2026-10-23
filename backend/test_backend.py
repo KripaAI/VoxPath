@@ -169,9 +169,9 @@ def test_chat_endpoint_uses_langgraph_agent(monkeypatch):
     import agent
     import auth
 
-    user = auth.User(id="u1", email="a@example.com")
+    user = auth.User(id="u1", username="alice", email="a@example.com")
 
-    async def fake_agent_chat(message: str, thread_id: str | None = None, user_id: str | None = None) -> str:
+    async def fake_agent_chat(message: str, thread_id: str | None = None, user_id: str | None = None, username: str | None = None) -> str:
         assert message == "Hello!"
         assert user_id == "u1"
         return "Agent says hello"
@@ -220,7 +220,7 @@ def test_mcp_mount_rejects_missing_and_forged_tokens(monkeypatch):
     assert client.post("/mcp/").status_code == 401
     assert client.post("/mcp/", headers={"Authorization": "Bearer nonsense"}).status_code == 401
 
-    forged = auth.jwt.encode({"sub": "u1", "email": "a@example.com"}, "wrong-key-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", algorithm="HS256")
+    forged = auth.jwt.encode({"sub": "u1", "username": "alice"}, "wrong-key-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", algorithm="HS256")
     assert client.post("/mcp/", headers={"Authorization": f"Bearer {forged}"}).status_code == 401
 
 
@@ -228,7 +228,7 @@ def test_mcp_mount_accepts_a_valid_token(monkeypatch):
     import auth
 
     monkeypatch.setattr(auth, "JWT_SECRET", "test-secret-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
-    token = auth.create_token(auth.User(id="u1", email="a@example.com"))
+    token = auth.create_token(auth.User(id="u1", username="alice"))
     client = _guarded_echo()
     response = client.post("/mcp/", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200

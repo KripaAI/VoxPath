@@ -46,7 +46,7 @@ def _run_traced_chat(monkeypatch, rewrite_root_io=True, responses=None):
     try:
         async def chat():
             await agent.init_agent(None, None)
-            return await agent.agent_chat("What is the stock price of Tata technology?", thread_id="t-9", user_id="u-1")
+            return await agent.agent_chat("What is the stock price of Tata technology?", thread_id="t-9", user_id="u-1", username="krish")
 
         reply = asyncio.run(chat())
     finally:
@@ -62,14 +62,14 @@ def test_agent_run_exports_a_clean_readable_tree(monkeypatch):
     names = [s.name for s in sorted(spans, key=lambda s: s.start_time)]
     assert not HIDDEN_SPAN_NAMES & set(names)
     assert names == [
-        ROOT_NAME,
+        f"{ROOT_NAME} · krish",
         "🧠 VoxPath Agent · decide → get_stock_price",
         "🔧 get_stock_price",
         "🧠 VoxPath Agent · answer",
     ]
 
     # One root; every other step hangs directly off it (no orphans, no broken links).
-    root = next(s for s in spans if s.name == ROOT_NAME)
+    root = next(s for s in spans if s.name.startswith(ROOT_NAME))
     assert root.parent is None
     for s in spans:
         if s is not root:
@@ -79,7 +79,8 @@ def test_agent_run_exports_a_clean_readable_tree(monkeypatch):
     # The trace list shows the question and the answer, tagged with conversation and user.
     assert root.attributes["input.value"] == "What is the stock price of Tata technology?"
     assert root.attributes["output.value"] == "Tata Technologies is trading at 657.35."
-    assert root.attributes["session.id"] == "t-9" and root.attributes["user.id"] == "u-1"
+    assert root.attributes["session.id"] == "t-9" and root.attributes["user.id"] == "krish"
+    assert '"user_id": "u-1"' in root.attributes["metadata"]  # internal id kept for memory lookups
 
     # Tool span keeps its real input/output.
     tool = next(s for s in spans if s.name == "🔧 get_stock_price")
@@ -92,12 +93,12 @@ def test_answer_without_tools_says_so(monkeypatch):
     reply, spans = _run_traced_chat(monkeypatch, responses=[AIMessage(content="Hajipur is HJP.")])
     assert reply == "Hajipur is HJP."
     names = [s.name for s in sorted(spans, key=lambda s: s.start_time)]
-    assert names == [ROOT_NAME, "🧠 VoxPath Agent · answer directly (no tools used)"]
+    assert names == [f"{ROOT_NAME} · krish", "🧠 VoxPath Agent · answer directly (no tools used)"]
 
 
 def test_root_io_left_alone_when_content_is_hidden(monkeypatch):
     _, spans = _run_traced_chat(monkeypatch, rewrite_root_io=False)
-    root = next(s for s in spans if s.name == ROOT_NAME)
+    root = next(s for s in spans if s.name.startswith(ROOT_NAME))
     assert root.attributes["input.mime_type"] == "application/json"
 
 

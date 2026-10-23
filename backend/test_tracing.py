@@ -49,7 +49,8 @@ def test_trace_context_tags_session_and_user_when_on(monkeypatch):
     instrumentation = pytest.importorskip("openinference.instrumentation")  # only with requirements-tracing.txt
     monkeypatch.setattr(tracing, "_enabled", True)
 
-    with tracing.trace_context("thread-9", "user-7"):
+    with tracing.trace_context("thread-9", "u_7", "krish"):
         attrs = dict(instrumentation.get_attributes_from_context())
     assert attrs["session.id"] == "thread-9"
-    assert attrs["user.id"] == "user-7"
+    assert attrs["user.id"] == "krish"  # readable username in Phoenix
+    assert '"user_id": "u_7"' in attrs["metadata"]

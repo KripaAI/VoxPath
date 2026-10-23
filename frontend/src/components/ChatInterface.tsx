@@ -337,8 +337,11 @@ function ChatContent({ user, onSignOut }: ChatProps) {
             </button>
           )}
 
-          <span className="hidden md:inline max-w-[180px] truncate text-[11px] text-slate-400" title={user.email}>
-            {user.email}
+          <span
+            className="hidden md:inline max-w-[180px] truncate text-[11px] text-slate-400"
+            title={user.email ? `${user.username} (${user.email})` : user.username}
+          >
+            {user.username}
           </span>
           <button
             onClick={onSignOut}

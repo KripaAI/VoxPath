@@ -275,14 +275,14 @@ async def _build_agent():
 
 
 async def agent_chat(
-    message: str, thread_id: str | None = None, user_id: str | None = None
+    message: str, thread_id: str | None = None, user_id: str | None = None, username: str | None = None
 ) -> str:
     """Run one text turn through the LangGraph agent; return the reply text.
 
-    thread_id scopes short-term memory (one conversation); user_id scopes
-    long-term memory (every conversation that person has had). There is no auth
-    yet so user_id is normally unset, but the memory tools read it from this
-    config, so wiring real users later needs no change here.
+    thread_id scopes short-term memory (one conversation); user_id, the signed-in
+    user's internal id, scopes long-term memory (every conversation that person
+    has had) and is what the memory tools read from the config. username is only
+    used to label traces so the user is recognisable there.
     """
     if _agent is None:
         raise RuntimeError(
@@ -294,7 +294,7 @@ async def agent_chat(
             "user_id": user_id or memory.DEFAULT_USER_ID,
         }
     }
-    with tracing.trace_context(config["configurable"]["thread_id"], config["configurable"]["user_id"]):
+    with tracing.trace_context(config["configurable"]["thread_id"], config["configurable"]["user_id"], username):
         # durability="exit": save the conversation once when the turn finishes rather
         # than after every graph step. Each save is a round trip to the remote
         # database, and per-step saves cost ~2 s of a chat turn; the stored

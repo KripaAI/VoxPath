@@ -34,30 +34,37 @@ class _Cursor:
 class FakeDB:
     """Just enough of the users/threads tables for auth.py, kept in memory.
 
-    `hide_existing_emails` makes the "is this email taken?" SELECT miss, to
-    simulate two sign-ups racing past it.
+    `hide_existing_users` makes the "is this username/email taken?" SELECT miss,
+    to simulate two sign-ups racing past it.
     """
 
     def __init__(self):
-        self.users: dict[str, dict] = {}  # email -> row
+        self.users: list[dict] = []
         self.threads: dict[str, str] = {}  # thread_id -> owner_id
-        self.hide_existing_emails = False
+        self.hide_existing_users = False
+
+    def _find(self, username, email):
+        for row in self.users:
+            if row["username"] == username or (email is not None and row["email"] == email):
+                return row
+        return None
 
     async def execute(self, sql, params: tuple = ()):
         s = " ".join(sql.split())
-        if s.startswith("CREATE TABLE"):
+        if s.startswith(("CREATE TABLE", "ALTER TABLE")):
             return _Cursor(None)
-        if s.startswith("SELECT 1 FROM users WHERE email"):
-            found = params[0] in self.users and not self.hide_existing_emails
-            return _Cursor({"?column?": 1} if found else None)
+        if s.startswith("SELECT username, email FROM users"):
+            row = None if self.hide_existing_users else self._find(*params)
+            return _Cursor({"username": row["username"], "email": row["email"]} if row else None)
         if s.startswith("INSERT INTO users"):
-            user_id, email, password_hash = params
-            if email in self.users:
+            user_id, username, email, password_hash = params
+            if self._find(username, email):
                 raise psycopg.errors.UniqueViolation("duplicate key value violates unique constraint")
-            self.users[email] = {"id": user_id, "email": email, "password_hash": password_hash}
+            self.users.append({"id": user_id, "username": username, "email": email, "password_hash": password_hash})
             return _Cursor(None)
-        if s.startswith("SELECT id, password_hash FROM users WHERE email"):
-            return _Cursor(self.users.get(params[0]))
+        if s.startswith("SELECT id, username, email, password_hash FROM users"):
+            username_or_email = params[0]
+            return _Cursor(self._find(username_or_email, username_or_email))
         if s.startswith("INSERT INTO threads") and "RETURNING owner_id" in s:
             # Upsert that only succeeds for the thread's owner (see auth.claim_thread).
             thread_id, user_id = params

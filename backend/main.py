@@ -226,7 +226,7 @@ def build_fallback_text(user_text: str | None) -> str:
 
 
 @app.post("/auth/register", response_model=auth.TokenResponse, dependencies=[Depends(ratelimit.limit_register)])
-async def register_endpoint(creds: auth.Credentials):
+async def register_endpoint(creds: auth.RegisterRequest):
     """Create an account and return a token. Open unless REGISTRATION_OPEN=false."""
     if os.getenv("REGISTRATION_OPEN", "true").strip().lower() in ("false", "0", "no"):
         raise HTTPException(403, "New sign-ups are currently closed.")
@@ -234,7 +234,7 @@ async def register_endpoint(creds: auth.Credentials):
 
 
 @app.post("/auth/login", response_model=auth.TokenResponse, dependencies=[Depends(ratelimit.limit_login)])
-async def login_endpoint(creds: auth.Credentials):
+async def login_endpoint(creds: auth.LoginRequest):
     return await auth.login(creds)
 
 
@@ -285,14 +285,14 @@ async def chat_endpoint(request: ChatRequest, user: auth.User = Depends(auth.cur
 
         log.info(
             "chat request from %s on thread %s: %r",
-            redact(user.email),
+            redact(user.username),
             thread_id,
             redact(user_text, 120),
         )
 
         try:
             text_content = await agent.agent_chat(
-                user_text, thread_id=thread_id, user_id=user.id
+                user_text, thread_id=thread_id, user_id=user.id, username=user.username
             )
         except Exception as routing_error:
             if is_db_unavailable(routing_error):

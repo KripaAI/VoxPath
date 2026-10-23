@@ -12,7 +12,7 @@ export const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://127.0.0.1:80
 
 const TOKEN_KEY = 'voxpath_token';
 
-export type User = { id: string; email: string };
+export type User = { id: string; username: string; email?: string | null };
 
 export function getToken(): string | null {
   try {
@@ -48,8 +48,9 @@ async function errorMessage(res: Response, fallback: string): Promise<string> {
     const body = await res.json();
     const detail = body?.detail;
     if (typeof detail === 'string') return detail;
-    // FastAPI validation errors arrive as a list of field problems.
-    if (Array.isArray(detail) && detail[0]?.msg) return String(detail[0].msg);
+    // FastAPI validation errors arrive as a list of field problems; custom checks
+    // are prefixed "Value error, " by pydantic, which isn't meant for users.
+    if (Array.isArray(detail) && detail[0]?.msg) return String(detail[0].msg).replace(/^Value error, /, '');
     if (typeof body?.error === 'string') return body.error;
   } catch {
     // Not JSON; fall through.
@@ -57,11 +58,11 @@ async function errorMessage(res: Response, fallback: string): Promise<string> {
   return fallback;
 }
 
-async function submit(path: string, email: string, password: string): Promise<User> {
+async function submit(path: string, body: Record<string, string | null>): Promise<User> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await errorMessage(res, 'Could not sign in.'));
   const data = await res.json();
@@ -69,8 +70,13 @@ async function submit(path: string, email: string, password: string): Promise<Us
   return data.user as User;
 }
 
-export const login = (email: string, password: string) => submit('/auth/login', email, password);
-export const register = (email: string, password: string) => submit('/auth/register', email, password);
+/** Sign in with a username or an email address. */
+export const login = (usernameOrEmail: string, password: string) =>
+  submit('/auth/login', { username: usernameOrEmail, password });
+
+/** Create an account; email is optional. */
+export const register = (username: string, password: string, email: string) =>
+  submit('/auth/register', { username, password, email: email.trim() || null });
 
 /** The signed-in user, or null when there is no valid session. */
 export async function fetchMe(): Promise<User | null> {

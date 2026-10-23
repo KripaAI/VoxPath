@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from langgraph.store.memory import InMemoryStore
 
+import auth
 import logging_config
 import main
 import memory
@@ -24,65 +25,98 @@ import stock_resolver
 # --------------------------------------------------------------------------- auth + chat
 
 
-def _register(client, email="a@example.com", password="password123"):
-    return client.post("/auth/register", json={"email": email, "password": password})
+def _register(client, username="alice", password="password123", email=None):
+    return client.post("/auth/register", json={"username": username, "password": password, "email": email})
 
 
 def test_register_login_me_and_chat_flow(fake_db, monkeypatch):
     import agent
 
-    async def fake_agent_chat(message, thread_id=None, user_id=None):
+    seen = {}
+
+    async def fake_agent_chat(message, thread_id=None, user_id=None, username=None):
+        seen.update(user_id=user_id, username=username)
         return f"echo: {message}"
 
     monkeypatch.setattr(agent, "agent_chat", fake_agent_chat)
     client = TestClient(main.app)
 
-    registered = _register(client)
+    registered = _register(client, "Alice_K", email="A@Example.com")
     assert registered.status_code == 200
+    assert registered.json()["user"]["username"] == "alice_k"  # usernames are case-insensitive
     assert registered.json()["user"]["email"] == "a@example.com"
 
-    login = client.post("/auth/login", json={"email": "A@Example.com", "password": "password123"})
-    assert login.status_code == 200
+    # Sign in with the username (any case) or with the email.
+    for identifier in ("ALICE_K", "a@example.com"):
+        login = client.post("/auth/login", json={"username": identifier, "password": "password123"})
+        assert login.status_code == 200, identifier
     headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
 
     me = client.get("/auth/me", headers=headers)
-    assert me.status_code == 200 and me.json()["email"] == "a@example.com"
+    assert me.status_code == 200 and me.json()["username"] == "alice_k"
 
     chat = client.post("/chat", json={"message": "hi", "thread_id": "t-1"}, headers=headers)
     assert chat.status_code == 200
     assert chat.json() == {"text": "echo: hi", "audio": None}
     assert fake_db.threads["t-1"] == me.json()["id"]
+    # The agent gets the username (for traces) alongside the internal id (for memory).
+    assert seen == {"user_id": me.json()["id"], "username": "alice_k"}
+
+
+def test_username_only_account_and_old_email_field(fake_db):
+    client = TestClient(main.app)
+    registered = _register(client, "bob")  # no email
+    assert registered.status_code == 200 and registered.json()["user"]["email"] is None
+    # Older clients posting {"email": ...} still sign in (the value may be a username).
+    assert client.post("/auth/login", json={"email": "bob", "password": "password123"}).status_code == 200
+
+
+def test_invalid_usernames_are_rejected(fake_db):
+    client = TestClient(main.app)
+    for bad in ("ab", "has space", "x" * 31, "-starts-with-dash", "a@b.com"):
+        response = _register(client, bad)
+        assert response.status_code == 422, bad
+        assert "Username must be 3-30 characters" in response.text
+
+
+def test_old_tokens_without_username_must_sign_in_again(fake_db):
+    old = auth.jwt.encode({"sub": "u_old", "email": "a@example.com"}, auth.JWT_SECRET, algorithm="HS256")
+    response = TestClient(main.app).get("/auth/me", headers={"Authorization": f"Bearer {old}"})
+    assert response.status_code == 401
 
 
 def test_other_users_thread_is_not_found(fake_db, monkeypatch):
     import agent
 
-    async def fake_agent_chat(message, thread_id=None, user_id=None):
+    async def fake_agent_chat(message, thread_id=None, user_id=None, username=None):
         return "ok"
 
     monkeypatch.setattr(agent, "agent_chat", fake_agent_chat)
     client = TestClient(main.app)
-    alice = {"Authorization": f"Bearer {_register(client, 'alice@example.com').json()['access_token']}"}
-    bob = {"Authorization": f"Bearer {_register(client, 'bob@example.com').json()['access_token']}"}
+    alice = {"Authorization": f"Bearer {_register(client, 'alice').json()['access_token']}"}
+    bob = {"Authorization": f"Bearer {_register(client, 'bob').json()['access_token']}"}
 
     assert client.post("/chat", json={"message": "hi", "thread_id": "shared"}, headers=alice).status_code == 200
     assert client.post("/chat", json={"message": "hi", "thread_id": "shared"}, headers=bob).status_code == 404
 
 
-def test_wrong_password_and_duplicate_email(fake_db):
+def test_wrong_password_and_duplicates(fake_db):
     client = TestClient(main.app)
-    assert _register(client).status_code == 200
-    assert client.post("/auth/login", json={"email": "a@example.com", "password": "wrong-pass"}).status_code == 401
-    assert _register(client).status_code == 409
+    assert _register(client, "alice", email="a@example.com").status_code == 200
+    assert client.post("/auth/login", json={"username": "alice", "password": "wrong-pass"}).status_code == 401
+    taken_name = _register(client, "ALICE", email="other@example.com")
+    assert taken_name.status_code == 409 and taken_name.json()["detail"] == "That username is already taken."
+    taken_email = _register(client, "carol", email="A@example.com")
+    assert taken_email.status_code == 409 and taken_email.json()["detail"] == "That email is already registered."
 
 
 def test_racing_duplicate_registration_returns_409_not_500(fake_db):
     client = TestClient(main.app)
     assert _register(client).status_code == 200
-    fake_db.hide_existing_emails = True  # the SELECT check misses, as in a race
+    fake_db.hide_existing_users = True  # the SELECT check misses, as in a race
     response = _register(client)
     assert response.status_code == 409
-    assert response.json()["detail"] == "That email is already registered."
+    assert response.json()["detail"] == "That username or email is already registered."
 
 
 def test_registration_can_be_closed(fake_db, monkeypatch):
@@ -97,7 +131,7 @@ def test_registration_can_be_closed(fake_db, monkeypatch):
 def test_login_rate_limit(fake_db, monkeypatch):
     monkeypatch.setattr(ratelimit.login_limiter, "limit", (2, 60))
     client = TestClient(main.app)
-    bad = {"email": "nobody@example.com", "password": "password123"}
+    bad = {"username": "nobody", "password": "password123"}
     assert client.post("/auth/login", json=bad).status_code == 401
     assert client.post("/auth/login", json=bad).status_code == 401
     limited = client.post("/auth/login", json=bad)
@@ -108,14 +142,14 @@ def test_login_rate_limit(fake_db, monkeypatch):
 def test_chat_rate_limit_is_per_user(fake_db, monkeypatch):
     import agent
 
-    async def fake_agent_chat(message, thread_id=None, user_id=None):
+    async def fake_agent_chat(message, thread_id=None, user_id=None, username=None):
         return "ok"
 
     monkeypatch.setattr(agent, "agent_chat", fake_agent_chat)
     monkeypatch.setattr(ratelimit.chat_limiter, "limit", (1, 60))
     client = TestClient(main.app)
-    alice = {"Authorization": f"Bearer {_register(client, 'alice@example.com').json()['access_token']}"}
-    bob = {"Authorization": f"Bearer {_register(client, 'bob@example.com').json()['access_token']}"}
+    alice = {"Authorization": f"Bearer {_register(client, 'alice').json()['access_token']}"}
+    bob = {"Authorization": f"Bearer {_register(client, 'bob').json()['access_token']}"}
 
     assert client.post("/chat", json={"message": "hi"}, headers=alice).status_code == 200
     assert client.post("/chat", json={"message": "hi"}, headers=alice).status_code == 429

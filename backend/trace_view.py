@@ -122,7 +122,9 @@ class ReadableTraceProcessor(SpanProcessor):
         elif kind == "TOOL":
             name = f"🔧 {span.name}"
         elif parent is None and span.name in _GRAPH_ROOT_NAMES:
-            name = ROOT_NAME
+            # Name the user in the trace list (user.id carries the username).
+            user = attributes.get("user.id")
+            name = f"{ROOT_NAME} · {user}" if user else ROOT_NAME
             attributes[_KIND] = "AGENT"
             if self._rewrite_root_io:
                 _show_question_and_answer(attributes)

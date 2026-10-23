@@ -81,10 +81,18 @@ def setup_tracing() -> bool:
     return True
 
 
-def trace_context(session_id: str | None, user_id: str | None):
-    """Tag spans created inside this block with the conversation and user ids."""
+def trace_context(session_id: str | None, user_id: str | None, username: str | None = None):
+    """Tag spans created inside this block with the conversation and the user.
+
+    Phoenix's user field shows the readable username (falling back to the internal
+    id); the internal id is kept in the metadata, as that is what memories use.
+    """
     if not _enabled:
         return contextlib.nullcontext()
     from openinference.instrumentation import using_attributes
 
-    return using_attributes(session_id=session_id or "", user_id=user_id or "")
+    return using_attributes(
+        session_id=session_id or "",
+        user_id=username or user_id or "",
+        metadata={"user_id": user_id or "", "username": username or ""},
+    )

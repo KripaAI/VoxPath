@@ -1,4 +1,8 @@
-"""Email and password authentication for VoxPath.
+"""Username and password authentication for VoxPath.
+
+Accounts have a unique, case-insensitive username and an optional email; users
+sign in with either. The username travels in the session token so logs and
+traces can name the user without a database lookup.
 
 Identity is the foundation the memory system needs: until a request carries a
 verified user, every conversation and every stored memory shares one bucket.
@@ -13,6 +17,7 @@ provider later means replacing `current_user` and leaving the rest alone.
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -21,7 +26,7 @@ import jwt
 import psycopg
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import AliasChoices, BaseModel, EmailStr, Field, field_validator
 
 from logging_config import get_logger, redact
 
@@ -42,14 +47,48 @@ _pool = None
 _bearer = HTTPBearer(auto_error=False)
 
 
+USERNAME_RULE = (
+    "Username must be 3-30 characters: letters, numbers, dot, dash or underscore, "
+    "starting with a letter or number."
+)
+_USERNAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{2,29}$")
+
+
+def normalize_username(value: str) -> str:
+    """Usernames are case-insensitive: stored and compared in lowercase."""
+    username = value.strip().lower()
+    if not _USERNAME_PATTERN.match(username):
+        raise ValueError(USERNAME_RULE)
+    return username
+
+
 class User(BaseModel):
     id: str
-    email: str
+    username: str
+    email: str | None = None
 
 
-class Credentials(BaseModel):
-    email: EmailStr
+class RegisterRequest(BaseModel):
+    username: str
     password: str = Field(min_length=MIN_PASSWORD_CHARS)
+    email: EmailStr | None = None
+
+    @field_validator("username")
+    @classmethod
+    def _valid_username(cls, value: str) -> str:
+        return normalize_username(value)
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _blank_email_is_none(cls, value):
+        return None if isinstance(value, str) and not value.strip() else value
+
+
+class LoginRequest(BaseModel):
+    # Username or email. "email" is still accepted as the field name so older
+    # clients that post {"email": ..., "password": ...} keep working.
+    username: str = Field(min_length=1, validation_alias=AliasChoices("username", "email"))
+    password: str
 
 
 class TokenResponse(BaseModel):
@@ -67,12 +106,23 @@ async def setup(pool) -> None:
             """
             CREATE TABLE IF NOT EXISTS users (
                 id            text PRIMARY KEY,
-                email         text UNIQUE NOT NULL,
+                username      text,
+                email         text UNIQUE,
                 password_hash text NOT NULL,
                 created_at    timestamptz NOT NULL DEFAULT now()
             )
             """
         )
+        # Upgrade databases created before usernames existed (safe to re-run):
+        # add the username column, make email optional, keep usernames unique.
+        # One statement per execute: the pool sends prepared statements, which
+        # Postgres refuses to combine.
+        for statement in (
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS username text",
+            "ALTER TABLE users ALTER COLUMN email DROP NOT NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS users_username_key ON users (username)",
+        ):
+            await conn.execute(statement)
 
 
         await conn.execute(
@@ -116,6 +166,7 @@ def create_token(user: User) -> str:
     now = datetime.now(timezone.utc)
     payload = {
         "sub": user.id,
+        "username": user.username,
         "email": user.email,
         "iat": now,
         "exp": now + timedelta(hours=TOKEN_TTL_HOURS),
@@ -123,41 +174,52 @@ def create_token(user: User) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-async def register(creds: Credentials) -> TokenResponse:
+async def register(creds: RegisterRequest) -> TokenResponse:
     user_id = f"u_{uuid.uuid4().hex[:16]}"
-    email = creds.email.lower().strip()
+    username = creds.username  # already normalized by RegisterRequest
+    email = creds.email.lower().strip() if creds.email else None
     password_hash = hash_password(creds.password)
     async with _pool.connection() as conn:
-        existing = await (await conn.execute("SELECT 1 FROM users WHERE email = %s", (email,))).fetchone()
-        if existing:
-            raise HTTPException(status.HTTP_409_CONFLICT, "That email is already registered.")
+        taken = await (
+            await conn.execute(
+                "SELECT username, email FROM users WHERE username = %s OR (email IS NOT NULL AND email = %s)",
+                (username, email),
+            )
+        ).fetchone()
+        if taken:
+            what = "username is already taken" if taken["username"] == username else "email is already registered"
+            raise HTTPException(status.HTTP_409_CONFLICT, f"That {what}.")
         try:
             await conn.execute(
-                "INSERT INTO users (id, email, password_hash) VALUES (%s, %s, %s)",
-                (user_id, email, password_hash),
+                "INSERT INTO users (id, username, email, password_hash) VALUES (%s, %s, %s, %s)",
+                (user_id, username, email, password_hash),
             )
         except psycopg.errors.UniqueViolation:
-            # Two sign-ups for the same email raced past the SELECT above.
-            raise HTTPException(status.HTTP_409_CONFLICT, "That email is already registered.")
-    user = User(id=user_id, email=email)
-    log.info("registered %s", redact(email))
+            # Two sign-ups for the same username or email raced past the SELECT above.
+            raise HTTPException(status.HTTP_409_CONFLICT, "That username or email is already registered.")
+    user = User(id=user_id, username=username, email=email)
+    log.info("registered %s", redact(username))
     return TokenResponse(access_token=create_token(user), user=user)
 
 
-async def login(creds: Credentials) -> TokenResponse:
-    email = creds.email.lower().strip()
+async def login(creds: LoginRequest) -> TokenResponse:
+    identifier = creds.username.strip().lower()  # a username or an email
     async with _pool.connection() as conn:
         row = await (
-            await conn.execute("SELECT id, password_hash FROM users WHERE email = %s", (email,))
+            await conn.execute(
+                "SELECT id, username, email, password_hash FROM users WHERE username = %s OR email = %s LIMIT 1",
+                (identifier, identifier),
+            )
         ).fetchone()
 
 
-    invalid = HTTPException(status.HTTP_401_UNAUTHORIZED, "Incorrect email or password.")
+    invalid = HTTPException(status.HTTP_401_UNAUTHORIZED, "Incorrect username or password.")
     if not row or not verify_password(creds.password, row["password_hash"]):
-        log.warning("failed login for %s", redact(email))
+        log.warning("failed login for %s", redact(identifier))
         raise invalid
-    user = User(id=row["id"], email=email)
-    log.info("login %s", redact(email))
+    # Accounts from before usernames existed fall back to their email until one is set.
+    user = User(id=row["id"], username=row["username"] or row["email"], email=row["email"])
+    log.info("login %s", redact(user.username))
     return TokenResponse(access_token=create_token(user), user=user)
 
 
@@ -190,10 +252,11 @@ def decode_token(token: str) -> User:
 
         raise jwt.InvalidTokenError("JWT_SECRET is not set")
     payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-    user_id, email = payload.get("sub"), payload.get("email")
-    if not user_id or not email:
-        raise jwt.InvalidTokenError("token is missing sub or email")
-    return User(id=user_id, email=email)
+    user_id, username = payload.get("sub"), payload.get("username")
+    if not user_id or not username:
+        # Includes tokens issued before usernames existed: the user signs in once more.
+        raise jwt.InvalidTokenError("token is missing sub or username")
+    return User(id=user_id, username=username, email=payload.get("email"))
 
 
 def require_token(app):
