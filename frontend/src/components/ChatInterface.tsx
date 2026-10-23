@@ -60,6 +60,13 @@ const INITIAL_WELCOME: Message = {
     '👋 **VoxPath Terminal Active.** Ask me anything about live Indian stock markets, verified news headlines, or IRCTC railway status.',
 };
 
+/** fetch() itself failed: nothing answered at API_BASE (as opposed to an error reply). */
+class BackendUnreachableError extends Error {
+  constructor() {
+    super('Unable to reach the VoxPath backend.');
+  }
+}
+
 const MESSAGES_KEY = 'voxpath_chat_messages';
 const THREAD_KEY = 'voxpath_thread_id';
 
@@ -81,7 +88,7 @@ function ChatContent({ user, onSignOut }: ChatProps) {
   const [messages, setMessages] = useState<Message[]>([INITIAL_WELCOME]);
   const [isThinking, setIsThinking] = useState(false);
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
-  const [status, setStatus] = useState<'Ready' | 'Processing'>('Ready');
+  const [status, setStatus] = useState<'Ready' | 'Processing' | 'Reconnecting'>('Ready');
   const [error, setError] = useState<string | null>(null);
   const [draftMessage, setDraftMessage] = useState('');
 
@@ -209,18 +216,38 @@ function ChatContent({ user, onSignOut }: ChatProps) {
     setError(null);
 
     try {
-      const res = await authFetch('/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: textToSend,
-          thread_id: getThreadId(),
-        }),
-      });
+      let res: Response;
+      let data;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          res = await authFetch('/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              message: textToSend,
+              thread_id: getThreadId(),
+            }),
+          });
+        } catch {
+          // fetch itself failed: the backend is not reachable at all.
+          throw new BackendUnreachableError();
+        }
 
-      // Error pages from a crashed server or a proxy are not JSON; don't let the
-      // parse error replace the real problem.
-      const data = await res.json().catch(() => null);
+        // Error pages from a crashed server or a proxy are not JSON; don't let the
+        // parse error replace the real problem.
+        data = await res.json().catch(() => null);
+
+        // The database was briefly unreachable before anything ran (the backend says
+        // so with retryable=true): wait as told and resend once, automatically.
+        if (res.status === 503 && data?.retryable === true && attempt === 0) {
+          const waitSeconds = Math.min(Number(res.headers.get('Retry-After')) || 5, 10);
+          setStatus('Reconnecting');
+          await new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000));
+          setStatus('Processing');
+          continue;
+        }
+        break;
+      }
 
       if (res.status === 401) {
         onSignOut();
@@ -247,13 +274,16 @@ function ChatContent({ user, onSignOut }: ChatProps) {
       }
     } catch (backendError) {
       console.error('Backend fetch error:', backendError);
-      const msg = backendError instanceof Error ? backendError.message : 'Unable to connect to backend server.';
+      const msg = backendError instanceof Error ? backendError.message : 'Something went wrong.';
       setError(msg);
       setMessages((prev) => [
         ...prev,
         {
           role: 'assistant',
-          content: `⚠️ **Connection Error**: ${msg}\n\nMake sure the backend Python service is running on \`http://127.0.0.1:8000\`.`,
+          content:
+            backendError instanceof BackendUnreachableError
+              ? `⚠️ **Connection Error**: ${msg}\n\nMake sure the backend Python service is running on \`${API_BASE}\`.`
+              : `⚠️ ${msg}`,
         },
       ]);
     } finally {

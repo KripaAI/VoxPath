@@ -10,8 +10,9 @@ import io
 from contextlib import asynccontextmanager, AsyncExitStack
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres.aio import AsyncPostgresStore
+import psycopg
 from psycopg.rows import dict_row
-from psycopg_pool import AsyncConnectionPool
+from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
 # Load backend/.env before importing project modules: auth reads JWT_SECRET (and
 # other modules read their settings) at import time.
@@ -79,6 +80,9 @@ async def lifespan(app: FastAPI):
                     # Neon drops idle connections; ping only ones idle >60 s (see db_pool.py)
                     check=db_pool.check_if_idle,
                     reset=db_pool.mark_returned,
+                    # How long a request waits for a working connection while the pool
+                    # keeps retrying in the background (library default: 30 s).
+                    timeout=float(os.getenv("DB_POOL_TIMEOUT", "15")),
                     open=False,
                     kwargs={
 
@@ -133,6 +137,19 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="VoxPath API", lifespan=lifespan)
 
 
+@app.exception_handler(PoolTimeout)
+@app.exception_handler(psycopg.OperationalError)
+async def database_unavailable(request: Request, error: Exception):
+    """Any endpoint (sign-in, sign-up, ...) that can't reach the database answers
+    503 with a clear message instead of a bare 500."""
+    log.warning("database unavailable on %s: %s", request.url.path, error)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "VoxPath can't reach its database right now (a network problem). Please try again in a few seconds."},
+        headers={"Retry-After": str(DB_RETRY_AFTER_SECONDS)},
+    )
+
+
 @app.middleware("http")
 async def trace_requests(request: Request, call_next):
     """Assign a trace id to each HTTP request and log method, status, duration."""
@@ -173,6 +190,35 @@ class ChatRequest(BaseModel):
 def is_quota_error(error: Exception) -> bool:
     error_text = str(error).upper()
     return "RESOURCE_EXHAUSTED" in error_text or "QUOTA" in error_text or "429" in error_text
+
+
+def is_db_unavailable(error: BaseException) -> bool:
+    """The database couldn't be reached (network/DNS outage, Neon down), after the
+    pool's own reconnect attempts. Checks the cause chain, as libraries may wrap it."""
+    while error is not None:
+        if isinstance(error, (PoolTimeout, psycopg.OperationalError)):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
+DB_RETRY_AFTER_SECONDS = 5
+
+
+def db_unavailable_response(retryable: bool) -> JSONResponse:
+    """503 with a plain-language message. `retryable` tells the client whether
+    resending is harmless: true when the failure happened before the agent ran;
+    false when the agent may already have run (resending could repeat tool calls)."""
+    message = "VoxPath can't reach its database right now (a network problem). " + (
+        "Please try again in a few seconds."
+        if retryable
+        else "Your message may not have been saved; please send it again."
+    )
+    return JSONResponse(
+        status_code=503,
+        content={"error": message, "retryable": retryable},
+        headers={"Retry-After": str(DB_RETRY_AFTER_SECONDS)},
+    )
 
 
 def build_fallback_text(user_text: str | None) -> str:
@@ -228,7 +274,14 @@ async def chat_endpoint(request: ChatRequest, user: auth.User = Depends(auth.cur
 
 
         thread_id = request.thread_id or f"t_{user.id}"
-        await auth.claim_thread(thread_id, user)
+        try:
+            await auth.claim_thread(thread_id, user)
+        except Exception as db_error:
+            if not is_db_unavailable(db_error):
+                raise
+            # Nothing has run yet, so the client may safely resend.
+            log.warning("database unavailable before chat ran: %s", db_error)
+            return db_unavailable_response(retryable=True)
 
         log.info(
             "chat request from %s on thread %s: %r",
@@ -242,6 +295,11 @@ async def chat_endpoint(request: ChatRequest, user: auth.User = Depends(auth.cur
                 user_text, thread_id=thread_id, user_id=user.id
             )
         except Exception as routing_error:
+            if is_db_unavailable(routing_error):
+                # The agent may already have run (e.g. the final save failed), so a
+                # blind resend could repeat tool calls: let the user decide.
+                log.warning("database unavailable during chat: %s", routing_error)
+                return db_unavailable_response(retryable=False)
             if is_quota_error(routing_error):
                 log.warning("chat hit quota/rate limit, serving fallback: %s", routing_error)
                 fallback_text = build_fallback_text(user_text)
