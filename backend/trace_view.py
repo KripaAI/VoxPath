@@ -11,6 +11,8 @@ generic names. This span processor sits in front of the exporter and:
         ├─ 🧠 VoxPath Agent · decide → get_stock_price  (model call that chose tools)
         ├─ 🔧 get_stock_price                           (tool call: input -> output)
         └─ 🧠 VoxPath Agent · answer                    (model call that replied)
+    or, when no tool was called at all:
+        └─ 🧠 VoxPath Agent · answer directly (no tools used)
   * shows the root's input/output as the user's question and the final answer
     instead of the whole serialized message list.
 
@@ -51,6 +53,7 @@ class ReadableTraceProcessor(SpanProcessor):
         self._parent_of: dict[int, int | None] = {}
         self._hidden: set[int] = set()
         self._spans_in_trace: dict[int, list[int]] = {}
+        self._traces_with_tool_calls: set[int] = set()
 
     # -- SpanProcessor interface -------------------------------------------------
 
@@ -69,15 +72,19 @@ class ReadableTraceProcessor(SpanProcessor):
         with self._lock:
             hidden = ctx.span_id in self._hidden and kind not in ("LLM", "TOOL")
             parent = self._visible_parent(ctx.span_id)
+            if kind == "TOOL":
+                self._traces_with_tool_calls.add(ctx.trace_id)
+            used_tools = ctx.trace_id in self._traces_with_tool_calls
             if self._parent_of.get(ctx.span_id) is None:
                 # The root ends last: forget this trace's bookkeeping.
                 for span_id in self._spans_in_trace.pop(ctx.trace_id, []):
                     self._parent_of.pop(span_id, None)
                     self._hidden.discard(span_id)
+                self._traces_with_tool_calls.discard(ctx.trace_id)
         if hidden:
             return
         try:
-            span = self._rewrite(span, parent)
+            span = self._rewrite(span, parent, used_tools)
         except Exception:
             pass  # presentation must never cost us a span
         self._inner.on_end(span)
@@ -96,7 +103,7 @@ class ReadableTraceProcessor(SpanProcessor):
             parent = self._parent_of.get(parent)
         return parent
 
-    def _rewrite(self, span: ReadableSpan, parent: int | None) -> ReadableSpan:
+    def _rewrite(self, span: ReadableSpan, parent: int | None, used_tools: bool = True) -> ReadableSpan:
         attributes = dict(span.attributes or {})
         kind = attributes.get(_KIND)
         name = span.name
@@ -107,8 +114,11 @@ class ReadableTraceProcessor(SpanProcessor):
                 name = f"🧠 {AGENT_NAME} · error"
             elif tools:
                 name = f"🧠 {AGENT_NAME} · decide → {', '.join(tools)}"
-            else:
+            elif used_tools:
                 name = f"🧠 {AGENT_NAME} · answer"
+            else:
+                # Say it outright, so a missing tool step isn't mistaken for missing data.
+                name = f"🧠 {AGENT_NAME} · answer directly (no tools used)"
         elif kind == "TOOL":
             name = f"🔧 {span.name}"
         elif parent is None and span.name in _GRAPH_ROOT_NAMES:

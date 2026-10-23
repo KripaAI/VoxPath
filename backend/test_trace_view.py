@@ -29,7 +29,7 @@ class ChatOpenAI(FakeMessagesListChatModel):
         return 10
 
 
-def _run_traced_chat(monkeypatch, rewrite_root_io=True):
+def _run_traced_chat(monkeypatch, rewrite_root_io=True, responses=None):
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(ReadableTraceProcessor(SimpleSpanProcessor(exporter), rewrite_root_io=rewrite_root_io))
@@ -39,7 +39,7 @@ def _run_traced_chat(monkeypatch, rewrite_root_io=True):
     instrumentor.instrument(tracer_provider=provider)
     monkeypatch.setattr(tracing, "_enabled", True)
     monkeypatch.setattr(services, "get_stock_price_smart", lambda ticker: {"result": f"{ticker}: 657.35 INR"})
-    monkeypatch.setattr(services, "build_llm", lambda: ChatOpenAI(responses=[
+    monkeypatch.setattr(services, "build_llm", lambda: ChatOpenAI(responses=responses or [
         AIMessage(content="", tool_calls=[{"name": "get_stock_price", "args": {"ticker": "Tata technology"}, "id": "c1"}]),
         AIMessage(content="Tata Technologies is trading at 657.35."),
     ]))
@@ -87,6 +87,14 @@ def test_agent_run_exports_a_clean_readable_tree(monkeypatch):
     assert "657.35" in tool.attributes["output.value"]
 
 
+def test_answer_without_tools_says_so(monkeypatch):
+    # Like "station code of Hajipur?" asked again: answered from the conversation, no tool.
+    reply, spans = _run_traced_chat(monkeypatch, responses=[AIMessage(content="Hajipur is HJP.")])
+    assert reply == "Hajipur is HJP."
+    names = [s.name for s in sorted(spans, key=lambda s: s.start_time)]
+    assert names == [ROOT_NAME, "🧠 VoxPath Agent · answer directly (no tools used)"]
+
+
 def test_root_io_left_alone_when_content_is_hidden(monkeypatch):
     _, spans = _run_traced_chat(monkeypatch, rewrite_root_io=False)
     root = next(s for s in spans if s.name == ROOT_NAME)
@@ -96,7 +104,7 @@ def test_root_io_left_alone_when_content_is_hidden(monkeypatch):
 def test_a_rewrite_error_still_exports_the_span(monkeypatch):
     import trace_view
 
-    def broken(self, span, parent):
+    def broken(self, span, parent, used_tools=True):
         raise RuntimeError("bad attribute")
 
     monkeypatch.setattr(trace_view.ReadableTraceProcessor, "_rewrite", broken)
