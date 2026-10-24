@@ -29,6 +29,8 @@ import threading
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 from opentelemetry.trace import SpanContext, StatusCode
 
+import tracing
+
 AGENT_NAME = "VoxPath Agent"
 ROOT_NAME = "💬 VoxPath chat"
 
@@ -64,6 +66,8 @@ class ReadableTraceProcessor(SpanProcessor):
             self._spans_in_trace.setdefault(ctx.trace_id, []).append(ctx.span_id)
             if span.name in HIDDEN_SPAN_NAMES:
                 self._hidden.add(ctx.span_id)
+        if span.parent is None:
+            tracing.note_root_span(ctx.trace_id)  # lets the turn's database row link here
         self._inner.on_start(span, parent_context=parent_context)
 
     def on_end(self, span: ReadableSpan) -> None:

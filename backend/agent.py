@@ -7,12 +7,17 @@ registry the voice agent uses — so there is one tool layer behind both surface
 
 from __future__ import annotations
 
+import contextvars
 import functools
 import inspect
 import json
 import os
 import time
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
+from langchain_core.callbacks import get_usage_metadata_callback
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.messages.utils import trim_messages
 from langchain_core.tools import StructuredTool
@@ -41,7 +46,23 @@ SYSTEM_PROMPT = (
     "symbols from memory. For "
     "railway fares/availability you need IRCTC station codes like NDLS or HJP; if "
     "the user gives a city name, call resolve_station_code first. If a required "
-    "detail (PNR, train number, stations, date) is missing, ask for it. Keep "
+    "detail (PNR, train number, stations, date) is missing, ask for it. "
+    "News: for news about a state or city (e.g. Bihar, Patna, Uttar Pradesh), "
+    "pass it as region to get_latest_news. When the user asks for news without "
+    "saying which kind, first call search_memories for their news preferences "
+    "(topics, categories, language, region) and pass them to get_latest_news as "
+    "region, category, topic and language; "
+    "with no saved preference, omit category and topic, and set language to the "
+    "language the user is writing in ('en' or 'hi'). When they state a lasting news "
+    "interest (e.g. 'I follow cricket and markets', 'news in Hindi'), save it "
+    "with save_memory. Show each headline as one markdown bullet: the headline as "
+    "a link to its url, a dash and one short sentence from its summary if there "
+    "is one, then the source and published time in italics, like: "
+    "- [Headline](url) - one-line summary. *The Hindu, 24 Oct, 12:43 PM IST* "
+    "Use only urls from the tool result, never invent or alter one; if an item "
+    "has no url, show the headline without a link. Never describe headlines as "
+    "being about a place or topic unless they are; if the result has a note, "
+    "say plainly what wasn't found before listing what was. Keep "
     "answers short and clear. You have long-term memory across conversations: "
     "call search_memories before answering anything that depends on who the user "
     "is or what they prefer, and when they refer to something they told you "
@@ -77,6 +98,9 @@ AGENT_TOOLS = [
 _agent = None
 _saver = None
 _store = None
+# What the current chat turn did, when someone is recording it (see record_turn).
+_current_turn: contextvars.ContextVar[TurnRecord | None] = contextvars.ContextVar("current_turn", default=None)
+TOOL_OUTPUT_PREVIEW_CHARS = 1000
 
 
 
@@ -184,11 +208,57 @@ def _build_pre_model_hook(llm):
     return trim
 
 
+@dataclass
+class TurnRecord:
+    """What one chat turn did, for the analytics tables: every tool call, the
+    model's token usage, and the Phoenix trace id that shows the turn in detail."""
+
+    tool_calls: list[dict] = field(default_factory=list)
+    model: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    usage_by_model: dict[str, dict] = field(default_factory=dict)
+    trace_id: str | None = None
+
+    @property
+    def tools_used(self) -> list[str]:
+        """Each tool's name once, in the order first called."""
+        return list(dict.fromkeys(call["tool"] for call in self.tool_calls))
+
+
+@contextmanager
+def record_turn():
+    """Record what happens inside the block into the TurnRecord it yields.
+
+    A context variable rather than a module global, so concurrent chats (and the
+    tool threads each one starts) never see each other's calls.
+    """
+    turn = TurnRecord()
+    token = _current_turn.set(turn)
+    try:
+        yield turn
+    finally:
+        _current_turn.reset(token)
+
+
 def _record_tool_call(name: str, tool_input, output, started: float, status: str) -> None:
-    """Write one tool call to logs/tool_calls.log (JSON) and tool_calls_readable.log."""
+    """Note one tool call on the current turn, and write it to logs/tool_calls.log
+    (JSON) and tool_calls_readable.log."""
     try:
         duration_ms = (time.perf_counter() - started) * 1000
         tool_input, output = redact(tool_input), redact(output)
+        turn = _current_turn.get()
+        if turn is not None:
+            output_text = output if isinstance(output, str) else json.dumps(output, ensure_ascii=False, default=str)
+            turn.tool_calls.append({
+                "tool": name,
+                "input": json.loads(json.dumps(tool_input, ensure_ascii=False, default=str)),
+                "output_preview": None if status == "error" else output_text[:TOOL_OUTPUT_PREVIEW_CHARS],
+                "status": status,
+                "error": output_text[:TOOL_OUTPUT_PREVIEW_CHARS] if status == "error" else None,
+                "duration_ms": round(duration_ms),
+                "started_at": datetime.now(timezone.utc) - timedelta(milliseconds=duration_ms),
+            })
         log_tool_call(name, tool_input, output, duration_ms, status)
         body = (
             f"Input: {json.dumps(tool_input, ensure_ascii=False, default=str)}\n"
@@ -294,14 +364,52 @@ async def agent_chat(
             "user_id": user_id or memory.DEFAULT_USER_ID,
         }
     }
-    with tracing.trace_context(config["configurable"]["thread_id"], config["configurable"]["user_id"], username):
-        # durability="exit": save the conversation once when the turn finishes rather
-        # than after every graph step. Each save is a round trip to the remote
-        # database, and per-step saves cost ~2 s of a chat turn; the stored
-        # history is the same. A crash mid-turn loses only that unfinished turn.
-        result = await _agent.ainvoke(
-            {"messages": [HumanMessage(content=message)]}, config=config, durability="exit"
-        )
+    with (
+        tracing.trace_context(config["configurable"]["thread_id"], config["configurable"]["user_id"], username),
+        tracing.capture_trace_id() as trace,
+        get_usage_metadata_callback() as usage,
+    ):
+        try:
+            # durability="exit": save the conversation once when the turn finishes rather
+            # than after every graph step. Each save is a round trip to the remote
+            # database, and per-step saves cost ~2 s of a chat turn; the stored
+            # history is the same. A crash mid-turn loses only that unfinished turn.
+            result = await _agent.ainvoke(
+                {"messages": [HumanMessage(content=message)]}, config=config, durability="exit"
+            )
+        finally:
+            _note_usage(usage.usage_metadata, trace.get("trace_id"))
     final = result["messages"][-1]
     content = final.content
     return content if isinstance(content, str) else str(content)
+
+
+def _note_usage(usage_by_model: dict, trace_id: str | None) -> None:
+    """Put the turn's token counts (summed over its model calls) on the current turn."""
+    turn = _current_turn.get()
+    if turn is None:
+        return
+    turn.trace_id = trace_id
+    if usage_by_model:
+        turn.usage_by_model = dict(usage_by_model)
+        turn.model = ", ".join(usage_by_model)
+        turn.prompt_tokens = sum(u.get("input_tokens", 0) for u in usage_by_model.values())
+        turn.completion_tokens = sum(u.get("output_tokens", 0) for u in usage_by_model.values())
+
+
+async def get_messages(thread_id: str) -> list[dict]:
+    """A saved conversation as the user saw it: their messages and the final answers.
+
+    Tool calls and tool results are the agent's working, never shown in the chat,
+    so they are left out. Read-only: nothing in the checkpoints is changed.
+    """
+    if _agent is None or _saver is None:
+        return []
+    state = await _agent.aget_state({"configurable": {"thread_id": thread_id}})
+    messages = []
+    for message in state.values.get("messages", []):
+        if isinstance(message, HumanMessage):
+            messages.append({"role": "user", "content": str(message.content)})
+        elif isinstance(message, AIMessage) and message.content and not message.tool_calls:
+            messages.append({"role": "assistant", "content": str(message.content)})
+    return messages

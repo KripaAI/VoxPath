@@ -19,6 +19,7 @@ Settings (backend/.env):
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import os
 
 from logging_config import get_logger, user_content_logging
@@ -79,6 +80,31 @@ def setup_tracing() -> bool:
     _enabled = True
     log.info("Phoenix tracing on -> %s (message content %s)", endpoint, "hidden" if hide else "visible")
     return True
+
+
+# Where the trace id of the chat turn now running goes, so the turn's database
+# row can link to its Phoenix trace. A context variable, so concurrent turns
+# each get their own.
+_trace_id_sink: contextvars.ContextVar[dict | None] = contextvars.ContextVar("trace_id_sink", default=None)
+
+
+@contextlib.contextmanager
+def capture_trace_id():
+    """Yield a dict that gets "trace_id" (32 hex chars, as Phoenix shows it) once
+    the first root span starts inside the block. Stays empty when tracing is off."""
+    holder: dict = {}
+    token = _trace_id_sink.set(holder)
+    try:
+        yield holder
+    finally:
+        _trace_id_sink.reset(token)
+
+
+def note_root_span(trace_id: int) -> None:
+    """Called by the span processor when a trace's root span starts."""
+    holder = _trace_id_sink.get()
+    if holder is not None and "trace_id" not in holder:
+        holder["trace_id"] = format(trace_id, "032x")
 
 
 def trace_context(session_id: str | None, user_id: str | None, username: str | None = None):

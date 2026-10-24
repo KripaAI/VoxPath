@@ -11,6 +11,7 @@ import asyncio
 import os
 import time
 
+import analytics
 import services
 from logging_config import get_logger, new_trace_id
 
@@ -24,14 +25,15 @@ _last_refresh: float | None = None
 
 async def _refresh_once() -> None:
     global _last_refresh
-    new_trace_id(prefix="n")
+    run_id = new_trace_id(prefix="n")
     result = await asyncio.to_thread(
         services.crawl_news, source_query=None, dry_run=False, limit=None
     )
     _last_refresh = time.time()
     saved = result.get("saved")
-    sources = len(result.get("summary") or [])
-    log.info("news refresh complete: saved=%s from %s sources", saved, sources)
+    summary = result.get("summary") or []
+    log.info("news refresh complete: saved=%s from %s sources", saved, len(summary))
+    await analytics.record_crawl(run_id, summary)  # per-source health; never raises
 
 
 def status() -> dict:

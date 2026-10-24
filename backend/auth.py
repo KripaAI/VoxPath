@@ -135,6 +135,10 @@ async def setup(pool) -> None:
             )
             """
         )
+        # Upgrade: conversations get a title (from their first real message), and
+        # deleting one only stamps deleted_at -- the chat is hidden, never erased.
+        await conn.execute("ALTER TABLE threads ADD COLUMN IF NOT EXISTS title text")
+        await conn.execute("ALTER TABLE threads ADD COLUMN IF NOT EXISTS deleted_at timestamptz")
     if not JWT_SECRET:
         raise RuntimeError(
             "JWT_SECRET is not set. Generate one with `python -c \"import "
@@ -202,6 +206,15 @@ async def register(creds: RegisterRequest) -> TokenResponse:
     return TokenResponse(access_token=create_token(user), user=user)
 
 
+class LoginFailed(HTTPException):
+    """A refused sign-in. The user always sees the same message, so it doesn't
+    reveal which usernames exist; `reason` keeps the real cause for analytics."""
+
+    def __init__(self, reason: str):
+        super().__init__(status.HTTP_401_UNAUTHORIZED, "Incorrect username or password.")
+        self.reason = reason
+
+
 async def login(creds: LoginRequest) -> TokenResponse:
     identifier = creds.username.strip().lower()  # a username or an email
     async with _pool.connection() as conn:
@@ -213,10 +226,9 @@ async def login(creds: LoginRequest) -> TokenResponse:
         ).fetchone()
 
 
-    invalid = HTTPException(status.HTTP_401_UNAUTHORIZED, "Incorrect username or password.")
     if not row or not verify_password(creds.password, row["password_hash"]):
         log.warning("failed login for %s", redact(identifier))
-        raise invalid
+        raise LoginFailed("unknown user" if not row else "wrong password")
     # Accounts from before usernames existed fall back to their email until one is set.
     user = User(id=row["id"], username=row["username"] or row["email"], email=row["email"])
     log.info("login %s", redact(user.username))
@@ -292,8 +304,29 @@ def require_token(app):
     return guarded
 
 
-async def claim_thread(thread_id: str, user: User) -> None:
+# A first message made only of these words ("hi", "hello there", "good morning")
+# doesn't name the chat; the next real message does.
+_GREETINGS = {
+    "hi", "hii", "hiii", "hello", "helo", "hlo", "hey", "heya", "yo", "namaste", "hola",
+    "good", "morning", "afternoon", "evening", "there", "ok", "okay", "thanks", "thank", "you",
+}
+
+
+def make_title(message: str) -> str | None:
+    """The chat's title: the start of the message, or None for a bare greeting."""
+    text = " ".join(message.split())
+    words = re.findall(r"[a-z]+", text.lower())
+    if not words or all(word in _GREETINGS for word in words):
+        return None
+    return text[:60]
+
+
+async def claim_thread(thread_id: str, user: User, title: str | None = None) -> None:
     """Record ownership on first use; refuse someone else's thread.
+
+    Also names the thread: `title` is saved while the thread has none yet, so
+    the first real message names it and later messages leave it alone. A thread
+    the user deleted is refused like a stranger's: it stays hidden.
 
     Returns 404 rather than 403 for a thread owned by another user: a 403 would
     confirm the thread exists, which is itself a small leak.
@@ -305,11 +338,12 @@ async def claim_thread(thread_id: str, user: User) -> None:
         # both win (a separate SELECT-then-INSERT allowed that).
         row = await (
             await conn.execute(
-                "INSERT INTO threads (thread_id, owner_id) VALUES (%s, %s) "
-                "ON CONFLICT (thread_id) DO UPDATE SET last_used = now() "
-                "WHERE threads.owner_id = EXCLUDED.owner_id "
+                "INSERT INTO threads (thread_id, owner_id, title) VALUES (%s, %s, %s) "
+                "ON CONFLICT (thread_id) DO UPDATE SET last_used = now(), "
+                "title = COALESCE(threads.title, EXCLUDED.title) "
+                "WHERE threads.owner_id = EXCLUDED.owner_id AND threads.deleted_at IS NULL "
                 "RETURNING owner_id",
-                (thread_id, user.id),
+                (thread_id, user.id, title),
             )
         ).fetchone()
         if row is None:

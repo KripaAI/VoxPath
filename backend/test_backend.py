@@ -176,7 +176,7 @@ def test_chat_endpoint_uses_langgraph_agent(monkeypatch):
         assert user_id == "u1"
         return "Agent says hello"
 
-    async def fake_claim_thread(thread_id, owner):
+    async def fake_claim_thread(thread_id, owner, title=None):
         assert owner == user
 
     monkeypatch.setattr(agent, "agent_chat", fake_agent_chat)
@@ -189,7 +189,7 @@ def test_chat_endpoint_uses_langgraph_agent(monkeypatch):
         main.app.dependency_overrides.clear()
 
     assert response.status_code == 200
-    assert response.json() == {"text": "Agent says hello", "audio": None}
+    assert response.json()["text"] == "Agent says hello" and response.json()["audio"] is None
 
 
 def test_chat_endpoint_requires_a_token():

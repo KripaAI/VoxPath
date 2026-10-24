@@ -1,9 +1,11 @@
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse, Response
+from starlette.background import BackgroundTask
+from pydantic import BaseModel, Field
 import os
 import time
+import uuid
 from dotenv import load_dotenv
 import sys
 import io
@@ -21,7 +23,9 @@ load_dotenv()
 from logging_config import setup_logging, get_logger, new_trace_id, redact
 from mcp_server import mcp
 import agent
+import analytics
 import auth
+import conversations
 import db_pool
 import news_scheduler
 import ratelimit
@@ -115,6 +119,7 @@ async def lifespan(app: FastAPI):
             await saver.setup()
             await store.setup()
             await auth.setup(pool)
+            await analytics.setup(pool)
             log.info(
                 "postgres persistence ready (pool max_size=%d, embeddings=%s/%dd)",
                 pool.max_size,
@@ -135,6 +140,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="VoxPath API", lifespan=lifespan)
+app.include_router(conversations.router)
 
 
 @app.exception_handler(PoolTimeout)
@@ -226,16 +232,50 @@ def build_fallback_text(user_text: str | None) -> str:
 
 
 @app.post("/auth/register", response_model=auth.TokenResponse, dependencies=[Depends(ratelimit.limit_register)])
-async def register_endpoint(creds: auth.RegisterRequest):
+async def register_endpoint(creds: auth.RegisterRequest, request: Request):
     """Create an account and return a token. Open unless REGISTRATION_OPEN=false."""
-    if os.getenv("REGISTRATION_OPEN", "true").strip().lower() in ("false", "0", "no"):
-        raise HTTPException(403, "New sign-ups are currently closed.")
-    return await auth.register(creds)
+    ip = request.client.host if request.client else None
+    try:
+        if os.getenv("REGISTRATION_OPEN", "true").strip().lower() in ("false", "0", "no"):
+            raise HTTPException(403, "New sign-ups are currently closed.")
+        result = await auth.register(creds)
+    except HTTPException as refused:
+        analytics.spawn(analytics.record_auth_event(
+            "register_failed", username_tried=creds.username, reason=str(refused.detail), client_ip=ip
+        ))
+        raise
+    analytics.spawn(analytics.record_auth_event(
+        "register", username_tried=creds.username, user_id=result.user.id, client_ip=ip
+    ))
+    return result
 
 
 @app.post("/auth/login", response_model=auth.TokenResponse, dependencies=[Depends(ratelimit.limit_login)])
-async def login_endpoint(creds: auth.LoginRequest):
-    return await auth.login(creds)
+async def login_endpoint(creds: auth.LoginRequest, request: Request):
+    ip = request.client.host if request.client else None
+    tried = creds.username.strip().lower()
+    try:
+        result = await auth.login(creds)
+    except auth.LoginFailed as refused:
+        analytics.spawn(analytics.record_auth_event(
+            "login_failed", username_tried=tried, reason=refused.reason, client_ip=ip
+        ))
+        raise
+    analytics.spawn(analytics.record_auth_event("login_ok", username_tried=tried, user_id=result.user.id, client_ip=ip))
+    return result
+
+
+class FeedbackRequest(BaseModel):
+    turn_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
+    rating: int = Field(ge=-1, le=1)  # 1 thumbs up, -1 thumbs down, 0 clears the vote
+    comment: str | None = Field(default=None, max_length=1000)
+
+
+@app.post("/feedback", status_code=204)
+async def feedback_endpoint(feedback: FeedbackRequest, user: auth.User = Depends(auth.current_user)):
+    """Thumbs up/down on one answer (the turn_id that /chat returned with it)."""
+    await analytics.save_feedback(feedback.turn_id, user.id, feedback.rating, feedback.comment)
+    return Response(status_code=204)
 
 
 @app.get("/auth/me", response_model=auth.User)
@@ -275,7 +315,7 @@ async def chat_endpoint(request: ChatRequest, user: auth.User = Depends(auth.cur
 
         thread_id = request.thread_id or f"t_{user.id}"
         try:
-            await auth.claim_thread(thread_id, user)
+            await auth.claim_thread(thread_id, user, auth.make_title(user_text))
         except Exception as db_error:
             if not is_db_unavailable(db_error):
                 raise
@@ -290,36 +330,55 @@ async def chat_endpoint(request: ChatRequest, user: auth.User = Depends(auth.cur
             redact(user_text, 120),
         )
 
-        try:
-            text_content = await agent.agent_chat(
-                user_text, thread_id=thread_id, user_id=user.id, username=user.username
+        started = time.perf_counter()
+        turn_id = str(uuid.uuid4())
+
+        def recorded(content: dict, *, output: str | None, error: str | None = None, status_code: int = 200):
+            """The response (carrying the turn id, for feedback), with the turn saved
+            to the analytics tables once it has been sent."""
+            return JSONResponse(
+                status_code=status_code,
+                content={**content, "turn_id": turn_id},
+                background=BackgroundTask(
+                    analytics.record_turn,
+                    turn_id=turn_id,
+                    thread_id=thread_id,
+                    user=user,
+                    user_input=user_text,
+                    agent_output=output,
+                    status="error" if error else "ok",
+                    error=error,
+                    duration_ms=round((time.perf_counter() - started) * 1000),
+                    turn=turn,
+                ),
             )
+
+        try:
+            with agent.record_turn() as turn:
+                text_content = await agent.agent_chat(
+                    user_text, thread_id=thread_id, user_id=user.id, username=user.username
+                )
         except Exception as routing_error:
             if is_db_unavailable(routing_error):
                 # The agent may already have run (e.g. the final save failed), so a
-                # blind resend could repeat tool calls: let the user decide.
+                # blind resend could repeat tool calls: let the user decide. Not
+                # recorded: the database it would be recorded in is the one that's down.
                 log.warning("database unavailable during chat: %s", routing_error)
                 return db_unavailable_response(retryable=False)
             if is_quota_error(routing_error):
                 log.warning("chat hit quota/rate limit, serving fallback: %s", routing_error)
                 fallback_text = build_fallback_text(user_text)
-                return JSONResponse(
-                    content={
-                        "text": fallback_text,
-                        "audio": None,
-                    }
+                return recorded(
+                    {"text": fallback_text, "audio": None},
+                    output=fallback_text,
+                    error=f"quota/rate limit: {routing_error}",
                 )
             log.exception("chat agent failed: %s", routing_error)
-            return JSONResponse(status_code=500, content={"error": str(routing_error)})
+            return recorded({"error": str(routing_error)}, output=None, error=str(routing_error), status_code=500)
 
         log.info("chat reply (%d chars): %r", len(text_content), redact(text_content, 120))
 
-        return JSONResponse(
-            content={
-                "text": text_content,
-                "audio": None,
-            }
-        )
+        return recorded({"text": text_content, "audio": None}, output=text_content)
 
     except HTTPException:
 

@@ -1,5 +1,6 @@
 import os
 import re
+from datetime import timedelta, timezone
 from typing import Any, Iterator
 
 import yfinance as yf
@@ -7,6 +8,7 @@ from dotenv import load_dotenv
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
+import news_config
 import news_crawler
 import stock_resolver
 from logging_config import get_logger
@@ -256,25 +258,93 @@ def get_latest_headlines(limit: int = 10, source: str | None = None, language: s
     return news_crawler.get_latest_headlines(limit=limit, source=source, language=language)
 
 
-def get_latest_news(topic: str | None = None, limit: int = 5) -> dict[str, Any]:
-    """Curated latest news for agents: stored headlines, with a general fallback
-    if a free-text topic matches no source, and a one-off crawl if storage is empty."""
+IST = timezone(timedelta(hours=5, minutes=30))
+_LANGUAGES = {"en": "en", "english": "en", "hi": "hi", "hindi": "hi"}
+
+
+def _news_item(record: dict) -> dict[str, str]:
+    """One headline as the agent cites it: linked, dated, with a summary when the feed gave one."""
+    item = {"headline": record["headline"], "source": record["source"], "url": record.get("link", "")}
+    published = news_crawler.parse_time(record.get("timestamp"))
+    if published:
+        local = published.astimezone(IST)
+        item["published"] = f"{local.day} {local:%b}, {local.hour % 12 or 12}:{local:%M %p} IST"
+    if record.get("summary"):
+        item["summary"] = record["summary"]
+    item["category"] = news_crawler.category_of(record)
+    return item
+
+
+def _describe_news_filters(filters: dict[str, str | None]) -> str:
+    """e.g. "'cricket' sports news from Bihar in Hindi"."""
+    parts = [
+        filters["topic"] and f"'{filters['topic']}'",
+        f"{filters['category']} news" if filters["category"] else "news",
+        filters["region"] and f"from {filters['region']}",
+        filters["language"] and f"in {'Hindi' if filters['language'] == 'hi' else 'English'}",
+    ]
+    return " ".join(filter(None, parts))
+
+
+def get_latest_news(
+    topic: str | None = None,
+    category: str | None = None,
+    language: str | None = None,
+    limit: int = 5,
+    region: str | None = None,
+) -> dict[str, Any]:
+    """Latest saved headlines for the agent, filtered to what the user wants.
+
+    Each item carries its article URL and publish time so answers can cite and
+    link the source. When nothing matches, filters are relaxed one at a time
+    (language, then topic, category, region) and a `note` says what could not
+    be found, rather than passing off unrelated news as a match.
+    """
+    category = (category or "").strip().lower() or None
     topic = (topic or "").strip() or None
+    if category and category not in news_config.CATEGORIES:
+        topic = " ".join(filter(None, [topic, category]))  # e.g. "cricket": search for it instead
+        category = None
+    filters = {
+        "topic": topic,
+        "region": (region or "").strip() or None,
+        "category": category,
+        "language": _LANGUAGES.get((language or "").strip().lower()),
+    }
+    limit = max(1, min(int(limit or 5), 10))
 
-    def read(src: str | None) -> list[dict]:
-        return get_latest_headlines(limit=limit, source=src).get("headlines") or []
+    def search() -> list[dict]:
+        return news_crawler.search_news(limit=limit, **filters)
 
-    headlines = read(topic)
-    if not headlines and topic:
-        log.info("news topic=%r matched nothing, falling back to general", topic)
-        headlines = read(None)
-    if not headlines:
+    records = search()
+    if not records and not news_crawler.search_news(limit=1):
+        # Nothing saved yet (first run): crawl once, then search again.
         try:
-            headlines = crawl_news(source_query=None, limit=limit).get("headlines") or []
+            crawl_news(source_query=None)
         except Exception as error:
             log.warning("news fallback crawl failed: %s", error)
-    items = [{"headline": h["headline"], "source": h["source"]} for h in headlines[:limit]]
-    return {"headlines": items, "count": len(items)}
+        records = search()
+
+    result: dict[str, Any] = {}
+    if not records:
+        asked = _describe_news_filters(filters)
+        for loosen in ("language", "topic", "category", "region"):
+            if not filters[loosen]:
+                continue
+            filters[loosen] = None
+            records = search()
+            if records:
+                shown = _describe_news_filters(filters)
+                shown = "top national news" if shown == "news" else shown
+                log.info("news %r matched nothing, showing %s", asked, shown)
+                result["note"] = (
+                    f"No recent headlines matched {asked}. These are {shown} instead; "
+                    "tell the user that, and don't describe them as what was asked for."
+                )
+                break
+    items = [_news_item(record) for record in records]
+    result.update(headlines=items, count=len(items))
+    return result
 
 
 def get_stock_price_smart(ticker: str) -> dict[str, str]:

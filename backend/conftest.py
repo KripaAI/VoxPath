@@ -7,6 +7,7 @@ import os
 os.environ["PHOENIX_TRACING"] = "false"
 
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 import psycopg
 import pytest
@@ -30,6 +31,9 @@ class _Cursor:
     async def fetchone(self):
         return self._row
 
+    async def fetchall(self):
+        return self._row or []
+
 
 class FakeDB:
     """Just enough of the users/threads tables for auth.py, kept in memory.
@@ -41,6 +45,7 @@ class FakeDB:
     def __init__(self):
         self.users: list[dict] = []
         self.threads: dict[str, str] = {}  # thread_id -> owner_id
+        self.thread_rows: dict[str, dict] = {}  # thread_id -> title, times, deleted_at
         self.hide_existing_users = False
 
     def _find(self, username, email):
@@ -66,11 +71,41 @@ class FakeDB:
             username_or_email = params[0]
             return _Cursor(self._find(username_or_email, username_or_email))
         if s.startswith("INSERT INTO threads") and "RETURNING owner_id" in s:
-            # Upsert that only succeeds for the thread's owner (see auth.claim_thread).
-            thread_id, user_id = params
+            # Upsert that only succeeds for the thread's owner, and never for a
+            # thread they deleted (see auth.claim_thread).
+            thread_id, user_id, *rest = params
+            title = rest[0] if rest else None
             owner = self.threads.setdefault(thread_id, user_id)
-            return _Cursor({"owner_id": owner} if owner == user_id else None)
+            now = datetime.now(timezone.utc)
+            row = self.thread_rows.setdefault(
+                thread_id, {"thread_id": thread_id, "title": None, "created_at": now, "deleted_at": None}
+            )
+            if owner != user_id or row["deleted_at"]:
+                return _Cursor(None)
+            row["title"] = row["title"] or title
+            row["last_used"] = now
+            return _Cursor({"owner_id": owner})
+        if s.startswith("SELECT thread_id, title, created_at, last_used FROM threads"):
+            if "thread_id = %s" in s:
+                thread_id, user_id = params
+                return _Cursor(self._visible_thread(thread_id, user_id))
+            user_id, limit, offset = params
+            rows = [r for t, r in self.thread_rows.items() if self._visible_thread(t, user_id)]
+            rows = sorted(rows, key=lambda r: r["last_used"], reverse=True)
+            return _Cursor(rows[offset:offset + limit])
+        if s.startswith("UPDATE threads SET deleted_at = now()"):
+            thread_id, user_id = params
+            row = self._visible_thread(thread_id, user_id)
+            if row:
+                row["deleted_at"] = datetime.now(timezone.utc)
+            return _Cursor({"thread_id": thread_id} if row else None)
         raise AssertionError(f"FakeDB got unexpected SQL: {s}")
+
+    def _visible_thread(self, thread_id, user_id):
+        row = self.thread_rows.get(thread_id)
+        if row and self.threads.get(thread_id) == user_id and not row["deleted_at"]:
+            return row
+        return None
 
 
 class _FakePool:

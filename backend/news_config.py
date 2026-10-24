@@ -1,7 +1,24 @@
+"""News sources for the crawler.
+
+category is one of CATEGORIES: "india" for national news, "regional" for
+state/city pages (Bihar, Uttar Pradesh), and topic feeds for the rest. It lets
+the agent pick news by the user's interests.
+"""
+
+CATEGORIES = ("india", "world", "business", "sports", "technology", "science", "entertainment", "regional")
+
+# A region also matches its main cities, so "Bihar" finds Times of India Patna.
+REGION_ALIASES = {
+    "bihar": ("Bihar", "Patna"),
+    "uttar pradesh": ("Uttar Pradesh", "Lucknow"),
+    "up": ("Uttar Pradesh", "Lucknow"),
+}
+
 SOURCES = [
     {
         "name": "Times of India Uttar Pradesh (Lucknow)",
         "language": "en",
+        "category": "regional",
         "type": "html",
         "url": "https://timesofindia.indiatimes.com/city/lucknow",
         "selector": "a[href*='/city/lucknow/'][href*='articleshow'], a[href*='/city/lucknow/']",
@@ -10,6 +27,7 @@ SOURCES = [
     {
         "name": "Times of India Patna",
         "language": "en",
+        "category": "regional",
         "type": "html",
         "url": "https://timesofindia.indiatimes.com/city/patna",
         "selector": "a[href*='/city/patna/'][href*='articleshow'], a[href*='/city/patna/']",
@@ -18,6 +36,7 @@ SOURCES = [
     {
         "name": "Times of India",
         "language": "en",
+        "category": "india",
         "type": "rss",
         "url": "https://timesofindia.indiatimes.com/rssfeeds/-2128936835.cms",
         "max_items": 20,
@@ -25,6 +44,7 @@ SOURCES = [
     {
         "name": "The Hindu",
         "language": "en",
+        "category": "india",
         "type": "rss",
         "url": "https://www.thehindu.com/news/national/feeder/default.rss",
         "max_items": 20,
@@ -32,6 +52,7 @@ SOURCES = [
     {
         "name": "NDTV News",
         "language": "en",
+        "category": "india",
         "type": "rss",
         "url": "https://feeds.feedburner.com/ndtvnews-top-stories",
         "max_items": 20,
@@ -39,6 +60,7 @@ SOURCES = [
     {
         "name": "Hindustan Times",
         "language": "en",
+        "category": "india",
         "type": "rss",
         "url": "https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml",
         "max_items": 20,
@@ -46,6 +68,7 @@ SOURCES = [
     {
         "name": "Jagran Hindi",
         "language": "hi",
+        "category": "india",
         "type": "rss",
         "url": "https://rss.jagran.com/rss/news/national.xml",
         "max_items": 20,
@@ -53,6 +76,7 @@ SOURCES = [
     {
         "name": "BBC News India",
         "language": "en",
+        "category": "india",
         "type": "html",
         "url": "https://www.bbc.com/news/world/asia/india",
         "selector": "h2[data-testid='card-headline'], h2, a[href*='/news/world-asia-india']",
@@ -61,6 +85,7 @@ SOURCES = [
     {
         "name": "Amar Ujala",
         "language": "hi",
+        "category": "india",
         "type": "html",
         "url": "https://www.amarujala.com/india-news",
         "selector": "a[href^='/india-news/'], a[href^='/live/india-news/'], a[href^='/photo-gallery/india-news/']",
@@ -69,6 +94,7 @@ SOURCES = [
     {
         "name": "Amar Ujala Bihar",
         "language": "hi",
+        "category": "regional",
         "type": "html",
         "url": "https://www.amarujala.com/bihar",
         "selector": "a[href*='/bihar/'], a[href*='bihar-news-']",
@@ -77,6 +103,7 @@ SOURCES = [
     {
         "name": "Amar Ujala Uttar Pradesh",
         "language": "hi",
+        "category": "regional",
         "type": "html",
         "url": "https://www.amarujala.com/uttar-pradesh",
         "selector": "a[href*='/uttar-pradesh/'], a[href*='up-'], a[href*='/lucknow/'], a[href*='/varanasi/']",
@@ -85,6 +112,7 @@ SOURCES = [
     {
         "name": "News18 Hindi",
         "language": "hi",
+        "category": "india",
         "type": "html",
         "url": "https://hindi.news18.com/news/nation/",
         "selector": "a[href^='/news/nation/'][href$='.html'], a[href^='/news/business/'][href$='.html'], a[href^='/news/career/'][href$='.html'], a[href^='/news/dharm/'][href$='.html']",
@@ -93,6 +121,7 @@ SOURCES = [
     {
         "name": "Live Hindustan Bihar",
         "language": "hi",
+        "category": "regional",
         "type": "html",
         "url": "https://www.livehindustan.com/bihar",
         "selector": "a[href*='/bihar/'], a[href*='/patna/'], a[href*='/muzaffarpur/'], a[href*='/bhagalpur/'], a[href*='/gaya/']",
@@ -101,6 +130,7 @@ SOURCES = [
     {
         "name": "Live Hindustan Uttar Pradesh",
         "language": "hi",
+        "category": "regional",
         "type": "html",
         "url": "https://www.livehindustan.com/uttar-pradesh",
         "selector": "a[href*='/uttar-pradesh/'], a[href*='/lucknow/'], a[href*='/agra/'], a[href*='/gorakhpur/'], a[href*='/meerut/']",
@@ -109,6 +139,7 @@ SOURCES = [
     {
         "name": "Dainik Jagran Bihar",
         "language": "hi",
+        "category": "regional",
         "type": "html",
         "url": "https://www.jagran.com/bihar",
         "selector": "a[href*='/bihar/'], a[href*='bihar-news'], a[href*='patna-city']",
@@ -117,6 +148,7 @@ SOURCES = [
     {
         "name": "Dainik Jagran Uttar Pradesh",
         "language": "hi",
+        "category": "regional",
         "type": "html",
         "url": "https://www.jagran.com/uttar-pradesh",
         "selector": "a[href*='/uttar-pradesh/'], a[href*='lucknow-city'], a[href*='varanasi-city'], a[href*='kanpur-city']",
@@ -125,10 +157,147 @@ SOURCES = [
     {
         "name": "Firstpost",
         "language": "en",
+        "category": "india",
         "type": "html",
         "url": "https://www.firstpost.com/category/india",
         "selector": "a.en-ttl.latest_category_news, a.ctg-txt.latest_category_news, a[href*='/india/'][href$='.html'], a[href*='/explainers/'][href$='.html'], a[href*='/business/'][href$='.html']",
         "max_items": 15,
+    },
+    {
+        "name": "The Hindu Business",
+        "language": "en",
+        "category": "business",
+        "type": "rss",
+        "url": "https://www.thehindu.com/business/feeder/default.rss",
+        "max_items": 20,
+    },
+    {
+        "name": "Times of India Business",
+        "language": "en",
+        "category": "business",
+        "type": "rss",
+        "url": "https://timesofindia.indiatimes.com/rssfeeds/1898055.cms",
+        "max_items": 20,
+    },
+    {
+        "name": "NDTV Profit",
+        "language": "en",
+        "category": "business",
+        "type": "rss",
+        "url": "https://feeds.feedburner.com/ndtvprofit-latest",
+        "max_items": 20,
+    },
+    {
+        "name": "Mint Markets",
+        "language": "en",
+        "category": "business",
+        "type": "rss",
+        "url": "https://www.livemint.com/rss/markets",
+        "max_items": 20,
+    },
+    {
+        "name": "Economic Times Markets",
+        "language": "en",
+        "category": "business",
+        "type": "rss",
+        "url": "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
+        "max_items": 20,
+    },
+    {
+        "name": "The Hindu Sport",
+        "language": "en",
+        "category": "sports",
+        "type": "rss",
+        "url": "https://www.thehindu.com/sport/feeder/default.rss",
+        "max_items": 20,
+    },
+    {
+        "name": "Hindustan Times Sports",
+        "language": "en",
+        "category": "sports",
+        "type": "rss",
+        "url": "https://www.hindustantimes.com/feeds/rss/sports/rssfeed.xml",
+        "max_items": 20,
+    },
+    {
+        "name": "NDTV Sports",
+        "language": "en",
+        "category": "sports",
+        "type": "rss",
+        "url": "https://feeds.feedburner.com/ndtvsports-latest",
+        "max_items": 20,
+    },
+    {
+        "name": "The Hindu Technology",
+        "language": "en",
+        "category": "technology",
+        "type": "rss",
+        "url": "https://www.thehindu.com/sci-tech/technology/feeder/default.rss",
+        "max_items": 20,
+    },
+    {
+        "name": "Mint Technology",
+        "language": "en",
+        "category": "technology",
+        "type": "rss",
+        "url": "https://www.livemint.com/rss/technology",
+        "max_items": 20,
+    },
+    {
+        "name": "Hindustan Times Tech",
+        "language": "en",
+        "category": "technology",
+        "type": "rss",
+        "url": "https://www.hindustantimes.com/feeds/rss/technology/rssfeed.xml",
+        "max_items": 20,
+    },
+    {
+        "name": "The Hindu Science",
+        "language": "en",
+        "category": "science",
+        "type": "rss",
+        "url": "https://www.thehindu.com/sci-tech/science/feeder/default.rss",
+        "max_items": 20,
+    },
+    {
+        "name": "The Hindu World",
+        "language": "en",
+        "category": "world",
+        "type": "rss",
+        "url": "https://www.thehindu.com/news/international/feeder/default.rss",
+        "max_items": 20,
+    },
+    {
+        "name": "Hindustan Times World",
+        "language": "en",
+        "category": "world",
+        "type": "rss",
+        "url": "https://www.hindustantimes.com/feeds/rss/world-news/rssfeed.xml",
+        "max_items": 20,
+    },
+    {
+        "name": "Hindustan Times Entertainment",
+        "language": "en",
+        "category": "entertainment",
+        "type": "rss",
+        "url": "https://www.hindustantimes.com/feeds/rss/entertainment/rssfeed.xml",
+        "max_items": 20,
+    },
+    {
+        "name": "Times of India Entertainment",
+        "language": "en",
+        "category": "entertainment",
+        "type": "rss",
+        "url": "https://timesofindia.indiatimes.com/rssfeeds/1081479906.cms",
+        "max_items": 20,
+    },
+    {
+        "name": "Jagran Entertainment",
+        "language": "hi",
+        "category": "entertainment",
+        "type": "rss",
+        "url": "https://rss.jagran.com/rss/entertainment/bollywood.xml",
+        "max_items": 20,
     },
 ]
 

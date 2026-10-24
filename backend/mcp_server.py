@@ -109,9 +109,26 @@ def get_latest_headlines(limit: int = 10, source: str | None = None, language: s
     return services.get_latest_headlines(limit=limit, source=source, language=language)
 
 
-@mcp.tool(description="Fetch the latest live Indian news headlines. Pass a region like 'Bihar' or 'Uttar Pradesh' as topic, or omit for general news.")
-def get_latest_news(topic: str | None = None, limit: int = 5) -> dict[str, object]:
-    return services.get_latest_news(topic=topic, limit=limit)
+@mcp.tool(
+    description=(
+        "Fetch the latest Indian news. Each headline comes with its article url, "
+        "source, publish time and usually a summary. Filters (all optional): "
+        "region, an Indian state or city such as 'Bihar', 'Uttar Pradesh' or "
+        "'Patna'; category, one of india, world, business, sports, technology, "
+        "science, entertainment, regional; topic, free-text words that must "
+        "appear, such as 'cricket' or 'RBI'; language, 'en' or 'hi'. Omit all for "
+        "top national headlines. limit is 1-10. If the result has a note, the "
+        "headlines are NOT what was asked for: say so."
+    )
+)
+def get_latest_news(
+    region: str | None = None,
+    topic: str | None = None,
+    category: str | None = None,
+    language: str | None = None,
+    limit: int = 5,
+) -> dict[str, object]:
+    return services.get_latest_news(region=region, topic=topic, category=category, language=language, limit=limit)
 
 
 

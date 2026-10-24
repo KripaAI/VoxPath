@@ -51,6 +51,12 @@ def get_latest_file() -> Path | None:
     return files[0] if files else None
 
 
+def get_recent_files(count: int) -> list[Path]:
+    """The newest `count` daily headline files, newest first."""
+    ensure_dirs()
+    return sorted(DATA_DIR.glob("headlines_*.jsonl"), reverse=True)[:count]
+
+
 def read_jsonl(filepath: Path | None) -> list[dict]:
     if filepath is None or not filepath.exists():
         return []

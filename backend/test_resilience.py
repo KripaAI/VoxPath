@@ -16,7 +16,7 @@ def test_db_down_before_chat_runs_is_retryable(fake_db, monkeypatch):
     client = TestClient(main.app)
     headers = _token(client)
 
-    async def unreachable(thread_id, user):
+    async def unreachable(thread_id, user, title=None):
         raise PoolTimeout("couldn't get a connection after 15.00 sec")
 
     monkeypatch.setattr(auth, "claim_thread", unreachable)

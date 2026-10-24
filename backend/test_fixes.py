@@ -57,7 +57,8 @@ def test_register_login_me_and_chat_flow(fake_db, monkeypatch):
 
     chat = client.post("/chat", json={"message": "hi", "thread_id": "t-1"}, headers=headers)
     assert chat.status_code == 200
-    assert chat.json() == {"text": "echo: hi", "audio": None}
+    assert chat.json()["text"] == "echo: hi" and chat.json()["audio"] is None
+    assert len(chat.json()["turn_id"]) == 36  # for thumbs up/down on this answer
     assert fake_db.threads["t-1"] == me.json()["id"]
     # The agent gets the username (for traces) alongside the internal id (for memory).
     assert seen == {"user_id": me.json()["id"], "username": "alice_k"}
