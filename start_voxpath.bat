@@ -40,7 +40,9 @@ findstr /I /R /C:"^PHOENIX_TRACING=true" "%BACKEND%\.env" >nul || goto tracing_d
     echo Installing tracing support into the backend ^(first run only^)...
     "%BACKEND%\.venv\Scripts\python.exe" -m pip install -r "%BACKEND%\requirements-tracing.txt" || (pause & exit /b 1)
 )
-if not exist "%TRACING%\.venv\Scripts\phoenix.exe" (
+rem Check and start Phoenix through python.exe, not phoenix.exe: pip's .exe launchers
+rem hard-code the folder the venv was created in and break if the project is moved.
+if not exist "%TRACING%\.venv\Scripts\python.exe" (
     echo Setting up the Phoenix tracing server ^(first run only, takes a few minutes^)...
     python -m venv "%TRACING%\.venv" || (pause & exit /b 1)
     "%TRACING%\.venv\Scripts\python.exe" -m pip install -r "%TRACING%\requirements.txt" || (pause & exit /b 1)
@@ -49,7 +51,7 @@ netstat -ano | findstr /R /C:":6006 .*LISTENING" >nul
 if errorlevel 1 (
     echo Starting Phoenix tracing UI on http://localhost:6006 ...
     rem PHOENIX_HOST=127.0.0.1 keeps traces (which contain chat text) off the local network.
-    start "VoxPath Tracing (Phoenix)" /D "%TRACING%" cmd /k "set "PHOENIX_HOST=127.0.0.1" && set "PHOENIX_WORKING_DIR=%TRACING%\data" && .venv\Scripts\phoenix.exe serve"
+    start "VoxPath Tracing (Phoenix)" /D "%TRACING%" cmd /k "set "PHOENIX_HOST=127.0.0.1" && set "PHOENIX_WORKING_DIR=%TRACING%\data" && .venv\Scripts\python.exe -m phoenix.server.main serve"
 ) else (
     echo Phoenix is already running on port 6006 - not starting another one.
 )
