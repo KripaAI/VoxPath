@@ -16,6 +16,7 @@ provider later means replacing `current_user` and leaving the rest alone.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import uuid
@@ -271,12 +272,23 @@ def decode_token(token: str) -> User:
     return User(id=user_id, username=username, email=payload.get("email"))
 
 
-def require_token(app):
+def require_token(app, on_user=None):
     """Wrap a mounted ASGI app so every HTTP request needs a valid bearer token.
 
     Mounted sub-apps sit outside FastAPI's dependency system, so `current_user`
-    cannot guard them; this does the same check at the ASGI layer.
+    cannot guard them; this does the same check at the ASGI layer. `on_user`, if
+    given, is called with the verified user and may refuse the request by raising
+    an HTTPException (e.g. a 429 from a rate limiter).
     """
+
+    async def refuse(send, status_code: int, detail: str, headers: dict | None = None):
+        await send({
+            "type": "http.response.start",
+            "status": status_code,
+            "headers": [(b"content-type", b"application/json")]
+            + [(k.lower().encode("latin-1"), str(v).encode("latin-1")) for k, v in (headers or {}).items()],
+        })
+        await send({"type": "http.response.body", "body": json.dumps({"detail": detail}).encode("utf-8")})
 
     async def guarded(scope, receive, send):
         if scope["type"] != "http":
@@ -287,18 +299,16 @@ def require_token(app):
         try:
             if scheme.lower() != "bearer" or not token:
                 raise jwt.InvalidTokenError("missing bearer token")
-            decode_token(token)
+            user = decode_token(token)
         except jwt.InvalidTokenError:
-            await send({
-                "type": "http.response.start",
-                "status": 401,
-                "headers": [
-                    (b"content-type", b"application/json"),
-                    (b"www-authenticate", b"Bearer"),
-                ],
-            })
-            await send({"type": "http.response.body", "body": b'{"detail":"Not authenticated."}'})
+            await refuse(send, 401, "Not authenticated.", {"WWW-Authenticate": "Bearer"})
             return
+        if on_user is not None:
+            try:
+                on_user(user)
+            except HTTPException as refused:
+                await refuse(send, refused.status_code, str(refused.detail), refused.headers)
+                return
         await app(scope, receive, send)
 
     return guarded

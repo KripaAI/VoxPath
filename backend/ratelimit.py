@@ -73,6 +73,9 @@ class RateLimiter:
 login_limiter = RateLimiter("login", "LOGIN_RATE_LIMIT", "10/60")
 register_limiter = RateLimiter("register", "REGISTER_RATE_LIMIT", "10/3600")
 chat_limiter = RateLimiter("chat", "CHAT_RATE_LIMIT", "30/60")
+# Direct tool calls over /mcp (only when MCP_HTTP_ENABLED=true): each one can hit a paid
+# API (RapidAPI) or start a news crawl, so they are limited per user like chat.
+mcp_limiter = RateLimiter("mcp", "MCP_RATE_LIMIT", "30/60")
 
 
 def _client_ip(request: Request) -> str:

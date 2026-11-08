@@ -98,6 +98,9 @@ const THREAD_KEY = 'voxpath_thread_id';
 const PAGE_SIZE = 20; // chats per sidebar page
 const MAX_PAGE = 200; // the backend's largest allowed limit
 
+/** Longest message the backend accepts (CHAT_MAX_CHARS in backend/.env, default 4000). */
+const MAX_MESSAGE_CHARS = 4000;
+
 /**
  * Mint a conversation id. crypto.randomUUID() needs a secure context, which
  * localhost and https satisfy but a plain-http LAN address does not.
@@ -697,6 +700,7 @@ function ChatContent({ user, onSignOut }: ChatProps) {
             <textarea
               ref={textareaRef}
               rows={1}
+              maxLength={MAX_MESSAGE_CHARS}
               value={draftMessage}
               onChange={handleTextChange}
               onKeyDown={handleKeyDown}

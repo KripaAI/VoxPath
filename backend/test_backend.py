@@ -235,9 +235,35 @@ def test_mcp_mount_accepts_a_valid_token(monkeypatch):
     assert response.text == "ok"
 
 
-def test_real_mcp_mount_is_guarded():
-    client = TestClient(main.app)
-    assert client.post("/mcp/", json={}).status_code == 401
+def test_mcp_is_not_exposed_by_default():
+    # The web app doesn't use /mcp; it stays off unless MCP_HTTP_ENABLED=true.
+    assert not main.MCP_HTTP_ENABLED
+    assert not any(getattr(route, "path", "") == "/mcp" for route in main.app.routes)
+
+
+def test_mcp_app_needs_a_token_and_is_rate_limited_per_user(monkeypatch):
+    import auth
+    import ratelimit
+    from starlette.applications import Starlette
+
+    monkeypatch.setattr(auth, "JWT_SECRET", "test-secret-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+    monkeypatch.setattr(ratelimit.mcp_limiter, "limit", (2, 60.0))
+
+    async def echo(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    app = Starlette()
+    app.mount("/mcp", main.mcp_http_app(inner=echo))
+    client = TestClient(app)
+    alice = {"Authorization": f"Bearer {auth.create_token(auth.User(id='u-alice', username='alice'))}"}
+    bob = {"Authorization": f"Bearer {auth.create_token(auth.User(id='u-bob', username='bob'))}"}
+
+    assert client.post("/mcp/").status_code == 401
+    assert [client.post("/mcp/", headers=alice).status_code for _ in range(3)] == [200, 200, 429]
+    refused = client.post("/mcp/", headers=alice)
+    assert refused.status_code == 429 and "Retry-After" in refused.headers
+    assert client.post("/mcp/", headers=bob).status_code == 200  # limited per user, not globally
 
 
 def _rail_client(handler):
