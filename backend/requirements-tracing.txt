@@ -9,3 +9,6 @@ arize-phoenix-otel==0.17.2
 openinference-instrumentation-langchain==0.1.79
 openinference-instrumentation==0.1.71
 opentelemetry-sdk==1.45.1
+# Evals (backend/evals): upload datasets and run experiments on the Phoenix server.
+# Same version as the server's own client in tracing/.venv (arize-phoenix 20.25.0).
+arize-phoenix-client==3.5.0

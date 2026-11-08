@@ -13,7 +13,10 @@ mount raises, which is why each one says so in its error.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -62,6 +65,93 @@ DEDUPE_SCORE = float(os.getenv("MEMORY_DEDUPE_SCORE", "0.85"))
 OVERFETCH = int(os.getenv("MEMORY_OVERFETCH", "3"))
 
 
+# --------------------------------------------------------------------------- "don't remember me"
+# A user can ask VoxPath not to save anything about them for the rest of a conversation.
+# The model was told this in the prompt and still saved facts one turn later (eval case
+# sess-003, 2 of 2 runs), so the rule is enforced here in code instead (book Ch 22: if a
+# required behaviour is still skipped despite clear instructions, put it in the workflow).
+#
+# agent.agent_chat opens a write policy for each run; the pre-model hook, which sees the
+# whole conversation, sets it from the user's messages (the latest request wins); and
+# save_memory / update_memory refuse while it is on. Reading and forgetting stay allowed.
+# Because it is re-derived from the conversation on every model call, it lasts as long as
+# the conversation does, across restarts, with no extra storage.
+
+_BLOCK_PATTERNS = [
+    # an instruction to the assistant: at the start of a sentence, or after please / and / so
+    r"(?:^|[.!?,;]\s*|\bplease\s+|\band\s+|\bso\s+)(?:do not|don't|dont|never|stop)\s+"
+    r"(?:save|saving|store|storing|record|recording|keep|memori[sz]e|remember|remembering)\b",
+    r"\b(?:no|without)\s+(?:saving|memory|memories)\b",
+    r"\bnothing\s+(?:to|in)\s+(?:your\s+)?memory\b",
+    r"\boff the record\b",
+    # Hindi / Hinglish imperative with मत / mat ("don't" in a request)
+    r"याद\s*मत|मत\s*याद|सेव\s*मत|मत\s*सेव|save\s+mat\b|mat\s+save\b|yaad\s+mat\b|mat\s+yaad\b|"
+    r"save\s+(?:na|nahi|nahin)\s+kar|yaad\s+(?:na|nahi|nahin)\s+rakh",
+]
+_ALLOW_PATTERNS = [
+    r"\byou can (?:now\s+)?(?:save|remember|store)\b",
+    r"\b(?:start|resume)\s+(?:saving|remembering|storing)\b",
+    r"\b(?:remember|save|store)\s+(?:things|stuff)?\s*again\b",
+    # an explicit request to remember a particular fact is consent for that fact
+    r"(?:^|[.!?,;]\s*|\bplease\s+|\balso\s+|\band\s+)(?:remember|save|store|note)\s+(?:that|this|my|me|it)\b",
+]
+_BLOCK = re.compile("|".join(_BLOCK_PATTERNS), re.IGNORECASE)
+_ALLOW = re.compile("|".join(_ALLOW_PATTERNS), re.IGNORECASE)
+
+
+def memory_directive(text: str) -> str | None:
+    """'block' if the message asks not to be remembered, 'allow' if it asks to be
+    remembered (again), None otherwise. A refusal wins over a request in one message
+    ("don't save this")."""
+    text = text or ""
+    if _BLOCK.search(text):
+        return "block"
+    if _ALLOW.search(text):
+        return "allow"
+    return None
+
+
+_write_policy: contextvars.ContextVar[dict | None] = contextvars.ContextVar("memory_write_policy", default=None)
+
+
+@contextlib.contextmanager
+def write_policy():
+    """Scope one agent run. Yields a mutable holder, so the hook and the tools (which run
+    in copies of this context) all see the same decision."""
+    holder = {"blocked": False}
+    token = _write_policy.set(holder)
+    try:
+        yield holder
+    finally:
+        _write_policy.reset(token)
+
+
+def apply_directives(user_messages: list[str]) -> None:
+    """Set the current run's policy from the user's messages, oldest first."""
+    holder = _write_policy.get()
+    if holder is None:
+        return
+    for text in user_messages:
+        directive = memory_directive(text)
+        if directive:
+            holder["blocked"] = directive == "block"
+
+
+def writes_blocked() -> bool:
+    holder = _write_policy.get()
+    return bool(holder and holder.get("blocked"))
+
+
+def _refused(fact: str) -> dict[str, object]:
+    log.info("memory write refused: the user asked not to be remembered in this conversation")
+    return {
+        "status": "not_saved",
+        "reason": "The user asked not to have anything saved in this conversation. Nothing was "
+                  "saved. Do not try again, and do not say you saved or noted it.",
+        "text": fact,
+    }
+
+
 def _require_store():
     store = get_store()
     if store is None:
@@ -94,6 +184,8 @@ async def save_memory(text: str) -> dict[str, object]:
     fact = text.strip()
     if not fact:
         return {"status": "ignored", "reason": "empty memory"}
+    if writes_blocked():
+        return _refused(fact)
 
     store = _require_store()
     namespace = _namespace()
@@ -120,6 +212,8 @@ async def update_memory(memory_id: str, text: str) -> dict[str, object]:
     fact = text.strip()
     if not fact:
         return {"status": "ignored", "reason": "empty memory"}
+    if writes_blocked():
+        return _refused(fact)
 
     store = _require_store()
     namespace = _namespace()

@@ -107,18 +107,35 @@ def note_root_span(trace_id: int) -> None:
         holder["trace_id"] = format(trace_id, "032x")
 
 
-def trace_context(session_id: str | None, user_id: str | None, username: str | None = None):
-    """Tag spans created inside this block with the conversation and the user.
+def trace_context(
+    session_id: str | None,
+    user_id: str | None,
+    username: str | None = None,
+    *,
+    prompt_version: str | None = None,
+    model: str | None = None,
+    extra_metadata: dict | None = None,
+):
+    """Tag spans created inside this block with the conversation, the user, and the
+    agent version (prompt fingerprint and model) that produced them.
 
     Phoenix's user field shows the readable username (falling back to the internal
     id); the internal id is kept in the metadata, as that is what memories use.
+    The version fields let traces be filtered and compared by agent version, e.g.
+    metadata['prompt_version'] == 'a1b2c3d4e5' in the Phoenix search bar.
     """
     if not _enabled:
         return contextlib.nullcontext()
     from openinference.instrumentation import using_attributes
 
+    metadata = {"user_id": user_id or "", "username": username or ""}
+    if prompt_version:
+        metadata["prompt_version"] = prompt_version
+    if model:
+        metadata["model"] = model
+    metadata.update(extra_metadata or {})
     return using_attributes(
         session_id=session_id or "",
         user_id=username or user_id or "",
-        metadata={"user_id": user_id or "", "username": username or ""},
+        metadata=metadata,
     )

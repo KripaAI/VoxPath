@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextvars
 import functools
+import hashlib
 import inspect
 import json
 import os
@@ -75,6 +76,11 @@ SYSTEM_PROMPT = (
     "home station, a standing interest) -- never for the answer to the current "
     "question, and never for live data."
 )
+
+# Short fingerprint of the system prompt, stamped on every trace and chat_messages
+# row, so results can always be tied to the exact instructions that produced them
+# (comparing versions is meaningless without it).
+PROMPT_VERSION = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()[:10]
 
 
 
@@ -184,6 +190,10 @@ def _build_pre_model_hook(llm):
     """
 
     def trim(state):
+        # The whole conversation is here (before trimming), so this is where a "don't
+        # remember me" request from any earlier turn is applied to this run's memory
+        # writes (memory.py enforces it in the tools).
+        memory.apply_directives([str(m.content) for m in state["messages"] if isinstance(m, HumanMessage)])
         messages = _cap_tool_messages(state["messages"])
         trimmed = trim_messages(
             messages,
@@ -219,6 +229,7 @@ class TurnRecord:
     completion_tokens: int | None = None
     usage_by_model: dict[str, dict] = field(default_factory=dict)
     trace_id: str | None = None
+    prompt_version: str = PROMPT_VERSION
 
     @property
     def tools_used(self) -> list[str]:
@@ -254,6 +265,9 @@ def _record_tool_call(name: str, tool_input, output, started: float, status: str
                 "tool": name,
                 "input": json.loads(json.dumps(tool_input, ensure_ascii=False, default=str)),
                 "output_preview": None if status == "error" else output_text[:TOOL_OUTPUT_PREVIEW_CHARS],
+                # The whole result, in memory only (analytics stores the preview): the
+                # evaluators check answers against it, e.g. every news link it cites.
+                "output": None if status == "error" else output,
                 "status": status,
                 "error": output_text[:TOOL_OUTPUT_PREVIEW_CHARS] if status == "error" else None,
                 "duration_ms": round(duration_ms),
@@ -365,9 +379,16 @@ async def agent_chat(
         }
     }
     with (
-        tracing.trace_context(config["configurable"]["thread_id"], config["configurable"]["user_id"], username),
+        tracing.trace_context(
+            config["configurable"]["thread_id"],
+            config["configurable"]["user_id"],
+            username,
+            prompt_version=PROMPT_VERSION,
+            model=services.get_model_name(),
+        ),
         tracing.capture_trace_id() as trace,
         get_usage_metadata_callback() as usage,
+        memory.write_policy(),
     ):
         try:
             # durability="exit": save the conversation once when the turn finishes rather

@@ -67,6 +67,9 @@ _SCHEMA = (
     "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS completion_tokens integer",
     "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS cost_usd numeric(12, 6)",
     "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS trace_id text",
+    # Fingerprint of the agent's system prompt (agent.PROMPT_VERSION), so results can
+    # be grouped and compared by agent version.
+    "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS prompt_version text",
     "CREATE INDEX IF NOT EXISTS chat_messages_thread_idx ON chat_messages (thread_id, created_at)",
     "CREATE INDEX IF NOT EXISTS chat_messages_user_idx ON chat_messages (user_id, created_at)",
     "CREATE UNIQUE INDEX IF NOT EXISTS chat_messages_turn_idx ON chat_messages (turn_id) WHERE turn_id IS NOT NULL",
@@ -201,8 +204,8 @@ async def record_turn(
     tool_calls = turn.tool_calls if turn else []
     statements = [(
         "INSERT INTO chat_messages (turn_id, thread_id, user_id, username, user_input, agent_output, "
-        "tools_used, status, error, duration_ms, model, prompt_tokens, completion_tokens, cost_usd, trace_id) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        "tools_used, status, error, duration_ms, model, prompt_tokens, completion_tokens, cost_usd, trace_id, "
+        "prompt_version) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             turn_id, thread_id, user.id, user.username, user_input, agent_output,
             turn.tools_used if turn else [], status, error, duration_ms,
@@ -211,6 +214,7 @@ async def record_turn(
             turn.completion_tokens if turn else None,
             cost_usd(turn.usage_by_model) if turn else None,
             turn.trace_id if turn else None,
+            turn.prompt_version if turn else None,
         ),
     )]
     for call in tool_calls:
