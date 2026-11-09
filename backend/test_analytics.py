@@ -150,7 +150,7 @@ def test_record_turn_writes_the_turn_and_its_tool_calls(monkeypatch):
     (turn_sql, turn_params), (tool_sql, tool_params) = pool.statements
     assert turn_sql.startswith("INSERT INTO chat_messages")
     assert turn_params[:10] == ("t1", "th", "u_1", "alice", "fare?", "₹500", ["get_fare"], "ok", None, 900)
-    assert turn_params[10:] == ("gpt-4o-mini", 1000, 100, 0.00021, "f" * 32)
+    assert turn_params[10:] == ("gpt-4o-mini", 1000, 100, 0.00021, "f" * 32, agent.PROMPT_VERSION)
     assert tool_sql.startswith("INSERT INTO tool_calls")
     assert tool_params[1:6] == ("t1", "th", "u_1", "get_fare", json.dumps({"train": "12345"}))
     assert tool_params[6] == json.dumps({"fare": 500}) and tool_params[7] == "ok"

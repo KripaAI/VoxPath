@@ -164,6 +164,18 @@ def summarize(text: str | None) -> str:
     return summary[:SUMMARY_CHARS].rsplit(" ", 1)[0] + "…"
 
 
+def in_wanted_section(link: str, source_config: dict | None) -> bool:
+    """For a source with `link_sections`, the article's site section (the first part
+    of its URL path, e.g. /markets/...) must be one of them, and no `link_exclude`
+    word may appear in the path. Sources without them: always."""
+    config = source_config or {}
+    sections, exclude = config.get("link_sections"), config.get("link_exclude", ())
+    path = urlparse(link or "").path.lower()
+    if any(word in path for word in exclude):
+        return False
+    return not sections or path.strip("/").split("/")[0] in sections
+
+
 def parse_rss(content: bytes, source_config: dict) -> list[dict]:
     results = []
     max_items = source_config.get("max_items", 10)
@@ -185,7 +197,7 @@ def parse_rss(content: bytes, source_config: dict) -> list[dict]:
             link = link_node.text if link_node.text else link_node.attrib.get("href", "")
         published = parse_time(pub_node.text if pub_node is not None else None) or datetime.now(timezone.utc)
 
-        if is_valid_headline(headline, link, source_config["url"]):
+        if is_valid_headline(headline, link, source_config["url"]) and in_wanted_section(link, source_config):
             results.append(
                 {
                     "headline": headline,
@@ -236,7 +248,7 @@ def parse_html(content: bytes, source_config: dict, encoding: str | None) -> tup
                 link_tag = container.find("a")
 
         link = urljoin(source_config["url"], link_tag["href"]) if link_tag and link_tag.has_attr("href") else source_config["url"]
-        if is_valid_headline(headline, link, source_config["url"]):
+        if is_valid_headline(headline, link, source_config["url"]) and in_wanted_section(link, source_config):
             results.append(
                 {
                     "headline": headline,
@@ -399,6 +411,7 @@ def get_latest_headlines(limit: int = 10, source: str | None = None, language: s
 
 # Headlines saved before categories existed get theirs from their source.
 _SOURCE_CATEGORY = {source["name"]: source["category"] for source in SOURCES}
+_SOURCE_BY_NAME = {source["name"]: source for source in SOURCES}
 _TOPIC_NOISE = {
     "news", "latest", "today", "todays", "headlines", "headline", "top", "update", "updates",
     "the", "and", "about", "from", "for", "in", "of", "on",
@@ -416,6 +429,37 @@ def _topic_words(topic: str) -> list[str]:
     return [w[:-1] if len(w) > 3 and w.isascii() and w.endswith("s") else w for w in words]
 
 
+# Broad themes are rarely spelled out in headlines ("Congress harbours hostility
+# towards Bihar" never says "politics"), so a theme word matches any of its
+# signs. English entries are whole words (an optional plural "s"); a trailing
+# "*" makes one a prefix. Hindi entries match anywhere, like Hindi topic words.
+# Only clear political signals: parties, elections, legislatures, politicians. Words
+# that also fill ordinary government news ("govt", "minister", "CM", "party", सरकार)
+# are left out: they let "CM opens Deepotsav" and "Govt sets Rabi crop target" pass
+# as politics, which the answers_question judge rightly failed.
+_POLITICS = (
+    "politic*", "election*", "poll", "polls", "bypoll*", "by-election*", "bjp", "congress", "rjd",
+    "jdu", "jd(u)", "aap", "nda", "india bloc", "jan suraaj", "mla", "mlas", "mps", "cabinet",
+    "assembly", "vidhan sabha", "lok sabha", "rajya sabha", "parliament*", "opposition", "governor",
+    "nitish", "tejashwi", "lalu", "chirag", "samrat choudhary", "prashant kishor", "modi",
+    "rahul gandhi", "amit shah", "yogi", "akhilesh", "mayawati", "manifesto",
+    "राजनीति", "सियासत", "चुनाव", "भाजपा", "कांग्रेस", "राजद", "जदयू", "विधायक", "सांसद",
+    "विधानसभा", "विपक्ष", "नीतीश", "तेजस्वी", "लालू", "चिराग", "मोदी",
+)
+TOPIC_THEMES: dict[str, tuple[str, ...]] = {
+    "politic": _POLITICS, "political": _POLITICS, "politician": _POLITICS,
+    "राजनीति": _POLITICS, "राजनीतिक": _POLITICS, "सियासी": _POLITICS,
+}
+
+
+def _mentions(text: str, term: str) -> bool:
+    if not term.isascii():
+        return term in text
+    if term.endswith("*"):
+        return re.search(rf"\b{re.escape(term[:-1])}", text) is not None
+    return re.search(rf"(?<!\w){re.escape(term)}s?(?!\w)", text) is not None
+
+
 def matches_topic(record: dict, topic: str) -> bool:
     """Every word of the topic appears in the headline, summary or source name."""
     words = _topic_words(topic)
@@ -423,9 +467,12 @@ def matches_topic(record: dict, topic: str) -> bool:
         return True
     text = f"{record.get('headline', '')} {record.get('summary', '')} {record.get('source', '')}".lower()
     for word in words:
-        # English words must start a word ("ai" must not match "said"); Hindi
-        # vowel signs break \b, so non-English words match anywhere.
-        found = re.search(rf"\b{re.escape(word)}", text) if word.isascii() else word in text
+        if word in TOPIC_THEMES:
+            found = any(_mentions(text, term) for term in TOPIC_THEMES[word])
+        else:
+            # English words must start a word ("ai" must not match "said"); Hindi
+            # vowel signs break \b, so non-English words match anywhere.
+            found = _mentions(text, word + "*")
         if not found:
             return False
     return True
@@ -439,14 +486,17 @@ def matches_region(record: dict, region: str) -> bool:
 def region_strength(record: dict, region: str) -> int:
     """2: the paper files it under the region (its source or URL section names it).
     1: the headline or summary only mentions it ("cook from Bihar dies in Bengaluru").
-    0: unrelated."""
+    0: unrelated.
+    A mention must be the whole name: "Atal Bihari Vajpayee" is not about Bihar
+    (but "Bihar's" is)."""
     names = REGION_ALIASES.get(region.strip().lower(), (region,))
     path = urlparse(record.get("link", "")).path.lower()
     for name in names:
         slug = name.lower().replace(" ", "-")
         if name.lower() in record.get("source", "").lower() or f"/{slug}/" in path:
             return 2
-    return 1 if any(matches_topic(record, name) for name in names) else 0
+    text = f"{record.get('headline', '')} {record.get('summary', '')}".lower()
+    return 1 if any(_mentions(text, name.lower()) for name in names) else 0
 
 
 # ---- same story, different paper
@@ -540,6 +590,9 @@ def search_news(
         if published and published < cutoff:
             continue
         if language and record.get("language") != language:
+            continue
+        # Also drops off-section stories saved before the source got link_sections.
+        if not in_wanted_section(record.get("link", ""), _SOURCE_BY_NAME.get(record.get("source", ""))):
             continue
         record_category = category_of(record)
         if category and record_category != category:

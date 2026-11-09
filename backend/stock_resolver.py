@@ -17,6 +17,7 @@ import time
 
 import requests
 
+import hindi_names
 from logging_config import get_logger
 
 log = get_logger("voxpath.stocks")
@@ -190,6 +191,86 @@ def nse_matches(query: str, limit: int = 3) -> list[str]:
 
         if score > 0:
             scored.append((score, len(name), symbol))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [symbol for _score, _len, symbol in scored[:limit]]
+
+
+# Sound keys of filler words ("and", "limited"...). One-letter keys are left out: "THE"
+# and "TATA" both reduce to "t", and TATA is a name, not filler.
+_NOISE_KEYS = {k for k in map(hindi_names.phonetic_key, _NOISE) if len(k) >= 2}
+_phonetic_index: tuple[int, list[tuple[str, str, list[tuple[str, str]], str]]] = (0, [])
+
+
+def _phonetic_rows(rows: list[tuple[str, str]]):
+    """(symbol, name, [(word, key)], symbol key) for every row, built once per NSE list."""
+    global _phonetic_index
+    if _phonetic_index[0] != id(rows):
+        index = []
+        for symbol, name in rows:
+            words = [w for w in name.split() if w not in _NOISE and _clean_word(w)]
+            index.append((symbol, name, [(_clean_word(w), hindi_names.phonetic_key(w)) for w in words], hindi_names.phonetic_key(symbol)))
+        _phonetic_index = (id(rows), index)
+    return _phonetic_index[1]
+
+
+def _sound_match(word: str, key: str, name_word: str, name_key: str) -> float:
+    """How well a transliterated word matches a company-name word by sound (0 = no match)."""
+    if word.isupper():  # an abbreviation (HDFC) is spelled, not heard: exact only
+        return 1.0 if word == name_word else 0.0
+    spelled = difflib.SequenceMatcher(None, word.upper(), name_word).ratio()
+    if key == name_key:
+        # One-letter keys ("tata" -> "t") are too common to trust on sound alone.
+        return 1.0 if len(key) >= 3 or spelled >= 0.6 else 0.0
+    if len(key) >= 3 and name_key.startswith(key):
+        return 0.95  # a short form, scored like a stem match: "pharma" for PHARMACEUTICAL
+    if len(key) >= 3 and len(name_key) >= 3 and key[0] == name_key[0]:
+        r = difflib.SequenceMatcher(None, key, name_key).ratio()
+        if r >= 0.75:
+            return 0.70 + 0.20 * r
+    return 0.0
+
+
+def nse_phonetic_matches(latin_query: str, limit: int = 3) -> list[str]:
+    """NSE symbols whose company name sounds like a transliterated Hindi name.
+
+    latin_query comes from hindi_names.to_latin(), e.g. "rilayans" or "HDFC baink".
+    Every query word must match a different word of the company name by sound;
+    names where more of the query matches, and that start with the first query
+    word, rank first. Returns [] when the query is only abbreviations (nse_matches
+    handles those exactly) or nothing sounds alike.
+    """
+    rows = _load()
+    words = [w for w in latin_query.split() if w.strip(".,&")]
+    keyed = [(w.upper() if w.isupper() else w, hindi_names.phonetic_key(w)) for w in words]
+    keyed = [(w, k) for w, k in keyed if k and k not in _NOISE_KEYS]
+    if not rows or not keyed or all(w.isupper() for w, _ in keyed):
+        return []
+
+    scored = []
+    for symbol, name, name_words, symbol_key in _phonetic_rows(rows):
+        if len(keyed) == 1 and not keyed[0][0].isupper() and len(keyed[0][1]) >= 3 and keyed[0][1] == symbol_key:
+            scored.append((95.0, len(name), symbol))  # e.g. पेटीएम -> "petiem" ~ PAYTM
+            continue
+        used: set[int] = set()
+        matches = []
+        for word, key in keyed:
+            best, best_idx = 0.0, -1
+            for idx, (name_word, name_key) in enumerate(name_words):
+                if idx not in used:
+                    m = _sound_match(word, key, name_word, name_key)
+                    if m > best:
+                        best, best_idx = m, idx
+            if best_idx < 0:
+                break
+            used.add(best_idx)
+            matches.append((best, best_idx))
+        if len(matches) != len(keyed):
+            continue
+        score = 60.0 * sum(m for m, _ in matches) / len(matches)
+        score += 20.0 * len(matches) / max(1, len(name_words))  # fewer unmatched name words
+        score += 10.0 if matches[0][1] == 0 else 0.0  # name starts with the first query word
+        scored.append((score, len(name), symbol))
 
     scored.sort(key=lambda item: (-item[0], item[1]))
     return [symbol for _score, _len, symbol in scored[:limit]]

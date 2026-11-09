@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
+import hindi_names
 import news_config
 import news_crawler
 import stock_resolver
@@ -16,6 +17,11 @@ from logging_config import get_logger
 load_dotenv()
 
 log = get_logger("voxpath.services")
+
+
+def get_model_name() -> str:
+    """The chat model the agent uses (OPENAI_MODEL)."""
+    return os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 
 def build_llm() -> BaseChatModel:
@@ -30,7 +36,7 @@ def build_llm() -> BaseChatModel:
             "OPENAI_API_KEY is not set. Add it to backend/.env to use the chat agent."
         )
     return ChatOpenAI(
-        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        model=get_model_name(),
         api_key=api_key,
         temperature=0,
 
@@ -153,6 +159,14 @@ def _candidate_symbols(query: str) -> Iterator[str]:
     q = query.strip()
     seen: set[str] = set()
     listed = False
+    hindi = hindi_names.has_devanagari(q)
+    if hindi:
+        # A name in Hindi script ("रिलायंस") would match nothing below, so the agent had
+        # to retry in English: one wasted tool call per Hindi stock question. Convert it
+        # here and match NSE names by sound, then fall through with the Latin spelling.
+        latin = hindi_names.to_latin(q)
+        log.info("stock name %r read as %r", q, latin)
+        q = latin or q
 
     def fresh(symbols):
         nonlocal listed
@@ -165,6 +179,9 @@ def _candidate_symbols(query: str) -> Iterator[str]:
     if q.endswith((".NS", ".BO")) or q.startswith("^"):
         yield from fresh([q])
 
+    if hindi:
+        yield from fresh(f"{sym}.NS" for sym in stock_resolver.nse_phonetic_matches(q))
+
     yield from fresh(f"{sym}.NS" for sym in stock_resolver.nse_matches(q))
 
     quotes = []
@@ -176,8 +193,19 @@ def _candidate_symbols(query: str) -> Iterator[str]:
     yield from fresh([r["symbol"] for r in quotes if r.get("symbol", "").endswith(".BO")])
 
     token = q.upper().replace(" ", "")
-    if token and not listed:
+    if token and not listed and not hindi:  # a transliteration is never itself a ticker
         yield from fresh([f"{token}.NS", f"{token}.BO"])
+
+
+_NIFTY_KEY = hindi_names.phonetic_key("nifty")
+
+
+def _is_hindi_nifty(query: str) -> bool:
+    """'निफ्टी' or 'निफ्टी 50' (the index, not a company)."""
+    if not hindi_names.has_devanagari(query):
+        return False
+    words = [w for w in hindi_names.to_latin(query).split() if not w.isdigit()]
+    return len(words) == 1 and hindi_names.phonetic_key(words[0]) == _NIFTY_KEY
 
 
 def get_stock_price(query: str) -> str:
@@ -185,7 +213,7 @@ def get_stock_price(query: str) -> str:
     if not query or not query.strip():
         return "Please specify a stock or company name."
     q = query.strip()
-    if q.upper() in ("NIFTY", "NIFTY50", "NIFTY 50"):
+    if q.upper() in ("NIFTY", "NIFTY50", "NIFTY 50") or _is_hindi_nifty(q):
         q = "^NSEI"
 
     for symbol in _candidate_symbols(q):
@@ -302,12 +330,17 @@ def get_latest_news(
     """
     category = (category or "").strip().lower() or None
     topic = (topic or "").strip() or None
+    region = (region or "").strip() or None
     if category and category not in news_config.CATEGORIES:
         topic = " ".join(filter(None, [topic, category]))  # e.g. "cricket": search for it instead
         category = None
+    if region and category in ("india", "regional"):
+        # The region already picks the papers: Bihar papers are "regional" and
+        # national papers "india", so either one would hide half of them.
+        category = None
     filters = {
         "topic": topic,
-        "region": (region or "").strip() or None,
+        "region": region,
         "category": category,
         "language": _LANGUAGES.get((language or "").strip().lower()),
     }

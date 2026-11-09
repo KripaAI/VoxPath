@@ -7,7 +7,7 @@ import os
 os.environ["PHOENIX_TRACING"] = "false"
 
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import psycopg
 import pytest
@@ -19,7 +19,7 @@ import ratelimit
 @pytest.fixture(autouse=True)
 def _reset_rate_limits():
     """Each test starts with empty rate-limit counters."""
-    for limiter in (ratelimit.login_limiter, ratelimit.register_limiter, ratelimit.chat_limiter):
+    for limiter in (ratelimit.login_limiter, ratelimit.register_limiter, ratelimit.chat_limiter, ratelimit.reset_limiter):
         limiter.reset()
     yield
 
@@ -47,6 +47,7 @@ class FakeDB:
         self.threads: dict[str, str] = {}  # thread_id -> owner_id
         self.thread_rows: dict[str, dict] = {}  # thread_id -> title, times, deleted_at
         self.hide_existing_users = False
+        self.resets: dict[str, dict] = {}  # user_id -> code_hash, expires_at, attempts
 
     def _find(self, username, email):
         for row in self.users:
@@ -99,6 +100,30 @@ class FakeDB:
             if row:
                 row["deleted_at"] = datetime.now(timezone.utc)
             return _Cursor({"thread_id": thread_id} if row else None)
+        if s.startswith("INSERT INTO password_resets"):
+            user_id, code_hash, minutes = params
+            self.resets[user_id] = {
+                "code_hash": code_hash,
+                "expires_at": datetime.now(timezone.utc) + timedelta(minutes=minutes),
+                "attempts": 0,
+            }
+            return _Cursor(None)
+        if s.startswith("SELECT code_hash, expires_at < now() AS expired, attempts FROM password_resets"):
+            row = self.resets.get(params[0])
+            if not row:
+                return _Cursor(None)
+            expired = row["expires_at"] < datetime.now(timezone.utc)
+            return _Cursor({"code_hash": row["code_hash"], "expired": expired, "attempts": row["attempts"]})
+        if s.startswith("UPDATE password_resets SET attempts = attempts + 1"):
+            self.resets[params[0]]["attempts"] += 1
+            return _Cursor(None)
+        if s.startswith("DELETE FROM password_resets"):
+            self.resets.pop(params[0], None)
+            return _Cursor(None)
+        if s.startswith("UPDATE users SET password_hash"):
+            password_hash, user_id = params
+            next(u for u in self.users if u["id"] == user_id)["password_hash"] = password_hash
+            return _Cursor(None)
         raise AssertionError(f"FakeDB got unexpected SQL: {s}")
 
     def _visible_thread(self, thread_id, user_id):

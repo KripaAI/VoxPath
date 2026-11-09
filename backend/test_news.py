@@ -102,6 +102,94 @@ def test_region_finds_the_state_and_its_main_city(saved_news):
     assert headlines(region="bihar", language="hi") == ["पटना में नई मेट्रो लाइन शुरू"]
 
 
+def test_top_political_news_from_bihar(saved_news):
+    # The real failure: the agent asked for region=Bihar, category=india, which hid
+    # every Bihar paper, and "Atal Bihari Vajpayee" passed for a Bihar mention.
+    saved_news(
+        (1, "BJP chief asks opposition to follow Advani", "Times of India", "india", "en",
+         "He credited Advani and Atal Bihari Vajpayee for the party's growth."),
+        (2, "Congress harbours hostility towards Bihar: Saraogi", "Times of India Patna", "regional", "en", ""),
+        (3, "Winter session of Bihar Vidhan Sabha to begin on Nov 30", "Times of India Patna", "regional", "en", ""),
+        (4, "10 ancient idols stolen from Saran temple", "Times of India Patna", "regional", "en", ""),
+        (5, "Bihar's Nitish Kumar meets the PM", "Hindustan Times", "india", "en", ""),
+        (6, "पटना में तेजस्वी का सरकार पर हमला", "Amar Ujala Bihar", "regional", "hi", ""),
+    )
+    headlines = lambda **kw: [h["headline"] for h in services.get_latest_news(limit=10, **kw)["headlines"]]
+
+    everything_from_bihar = headlines(region="Bihar")
+    assert "BJP chief asks opposition to follow Advani" not in everything_from_bihar  # "Bihari" is not Bihar
+    assert "Bihar's Nitish Kumar meets the PM" in everything_from_bihar
+    assert headlines(region="Bihar", category="india") == everything_from_bihar  # category no longer hides Bihar papers
+
+    # "politics" matches political headlines that never say the word, in both languages.
+    assert headlines(region="Bihar", topic="politics") == [
+        "Congress harbours hostility towards Bihar: Saraogi",
+        "Winter session of Bihar Vidhan Sabha to begin on Nov 30",
+        "पटना में तेजस्वी का सरकार पर हमला",
+        "Bihar's Nitish Kumar meets the PM",
+    ]
+    assert "10 ancient idols stolen from Saran temple" not in headlines(region="Bihar", topic="political news")
+    # The tool description offers "politics" as a category; it searches the same way.
+    assert headlines(region="Bihar", category="politics") == headlines(region="Bihar", topic="politics")
+
+
+def test_everyday_government_news_is_not_politics():
+    # Real Bihar headlines the answers_question judge failed as "political news".
+    record = lambda text: {"headline": text, "summary": "", "source": "Times of India Patna"}
+    for not_politics in (
+        "CM opens Deepotsav with over 11L lamps",
+        "Govt sets 48 lakh hectares target for Rabi crops cultivation",
+        "Early detection key to fighting cancer: Health minister",
+        "Birthday party turns violent in Gaya",
+    ):
+        assert not news_crawler.matches_topic(record(not_politics), "politics"), not_politics
+    for politics in (
+        "Congress harbours hostility towards Bihar: Saraogi",
+        "Five-day winter session of Bihar Vidhan Sabha to begin on Nov 30",
+        "Bypoll dates announced for two Bihar seats",
+    ):
+        assert news_crawler.matches_topic(record(politics), "politics"), politics
+
+
+def test_ndtv_profit_keeps_only_its_business_sections(saved_news):
+    # NDTV Profit's feed is general news; only its business sections count as business.
+    saved_news(
+        (1, "4 Dead, 88 Injured In Egypt Train Crash", "NDTV Profit", "business", "en", ""),
+        (2, "Muhurat Trading: Sun Pharma, Tata Steel Headline Gains", "NDTV Profit", "business", "en", ""),
+        (3, "Where is Hardik Pandya? IPL Exit Rumours", "NDTV Profit", "business", "en", ""),
+        (4, "Bosch bonus issue, stock split after 38% rally", "Mint Markets", "business", "en", ""),
+    )
+    path = news_storage.get_latest_file()
+    records = news_storage.read_jsonl(path)
+    for record, section in zip(records, ("world", "markets", "sports", "x")):
+        record["link"] = f"https://www.ndtvprofit.com/{section}/story-{section}"
+    path.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records), encoding="utf-8")
+
+    assert [r["headline"] for r in news_crawler.search_news(category="business", limit=10)] == [
+        "Muhurat Trading: Sun Pharma, Tata Steel Headline Gains",
+        "Bosch bonus issue, stock split after 38% rally",  # other sources are not filtered
+    ]
+
+    feed = b"""<rss><channel>
+      <item><title>Wall Street Races For Megadeals As Countdown Begins</title><link>https://www.ndtvprofit.com/markets/wall-street</link></item>
+      <item><title>Ramayana Clips Leak Online Ahead Of The Release</title><link>https://www.ndtvprofit.com/entertainment/ramayana</link></item>
+    </channel></rss>"""
+    config = next(s for s in news_crawler.SOURCES if s["name"] == "NDTV Profit")
+    assert [i["headline"] for i in news_crawler.parse_rss(feed, config)] == ["Wall Street Races For Megadeals As Countdown Begins"]
+
+    # Its /business/ section also carries film box office: that is not market news.
+    box_office = "https://www.ndtvprofit.com/business/entertainment-cinema-bollywood-movie-ramayana-box-office-collection-day-4"
+    assert not news_crawler.in_wanted_section(box_office, config)
+    assert news_crawler.in_wanted_section("https://www.ndtvprofit.com/business/dixon-working-capital", config)
+
+
+def test_theme_words_match_whole_words_only():
+    record = lambda text: {"headline": text, "summary": "", "source": "X"}
+    assert news_crawler.matches_topic(record("MPs walk out of the House"), "politics")
+    assert not news_crawler.matches_topic(record("Campus placement drive at IIT Patna"), "politics")  # "mp", "cm" inside words
+    assert not news_crawler.matches_topic(record("Pollution levels rise in Patna"), "politics")  # "poll" is a whole word
+
+
 def test_region_section_in_the_url_counts_as_filed_under_it(saved_news):
     saved_news(
         (1, "Cook from Bihar dies after being hit by a car in Bengaluru", "The Hindu", "india", "en", ""),

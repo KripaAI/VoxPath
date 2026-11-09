@@ -74,6 +74,25 @@ async function submit(path: string, body: Record<string, string | null>): Promis
 export const login = (usernameOrEmail: string, password: string) =>
   submit('/auth/login', { username: usernameOrEmail, password });
 
+/**
+ * Ask for a one-time reset code. The backend shows it in its own window and log,
+ * never in this response, and answers the same whether or not the account exists.
+ */
+export async function requestPasswordReset(usernameOrEmail: string): Promise<string> {
+  const res = await fetch(`${API_BASE}/auth/forgot-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: usernameOrEmail }),
+  });
+  if (!res.ok) throw new Error(await errorMessage(res, 'Could not request a reset code.'));
+  const data = await res.json();
+  return typeof data?.message === 'string' ? data.message : 'A reset code has been issued.';
+}
+
+/** Set a new password with the reset code; signs in on success. */
+export const resetPassword = (usernameOrEmail: string, code: string, password: string) =>
+  submit('/auth/reset-password', { username: usernameOrEmail, code, password });
+
 /** Create an account; email is optional. */
 export const register = (username: string, password: string, email: string) =>
   submit('/auth/register', { username, password, email: email.trim() || null });

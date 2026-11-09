@@ -4,6 +4,7 @@ from fastapi.responses import JSONResponse, Response
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 import os
+import re
 import time
 import uuid
 from dotenv import load_dotenv
@@ -186,11 +187,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+MAX_MESSAGE_CHARS = int(os.getenv("CHAT_MAX_CHARS", "4000"))
+# Thread ids come from the browser (a UUID) or the server (t_<user id>): letters, digits
+# and a little punctuation, never long. Anything else is refused before it is stored.
+_THREAD_ID = re.compile(r"[A-Za-z0-9_.:-]{1,100}")
+
+
+def _internal_error_message(reference: str) -> str:
+    return f"Something went wrong while answering. Please try again. (Reference: {reference})"
+
+
 class ChatRequest(BaseModel):
     message: str | None = None
-
-
     thread_id: str | None = None
+    # Edit one of the user's earlier messages in this chat instead of adding a new
+    # one: its position among their messages (0 = first), and its old text as a check.
+    edit_index: int | None = Field(default=None, ge=0, le=10_000)
+    edit_original: str | None = Field(default=None, max_length=MAX_MESSAGE_CHARS)
 
 
 def is_quota_error(error: Exception) -> bool:
@@ -265,6 +278,37 @@ async def login_endpoint(creds: auth.LoginRequest, request: Request):
     return result
 
 
+@app.post("/auth/forgot-password", status_code=202, dependencies=[Depends(ratelimit.limit_reset)])
+async def forgot_password_endpoint(req: auth.ForgotPasswordRequest, request: Request):
+    """Issue a one-time reset code. Same answer whether or not the account exists."""
+    ip = request.client.host if request.client else None
+    tried = req.username.strip().lower()
+    user_id = await auth.request_password_reset(tried)
+    analytics.spawn(analytics.record_auth_event(
+        "reset_requested", username_tried=tried, user_id=user_id,
+        reason=None if user_id else "unknown user", client_ip=ip,
+    ))
+    return {
+        "message": "If that account exists, a reset code has been issued. "
+                   "It is shown in the VoxPath backend window and in backend/logs/voxpath.log.",
+        "valid_minutes": auth.RESET_CODE_MINUTES,
+    }
+
+
+@app.post("/auth/reset-password", response_model=auth.TokenResponse, dependencies=[Depends(ratelimit.limit_reset)])
+async def reset_password_endpoint(req: auth.ResetPasswordRequest, request: Request):
+    """Set a new password with a valid reset code; signs the user in."""
+    ip = request.client.host if request.client else None
+    tried = req.username.strip().lower()
+    try:
+        result = await auth.reset_password(req)
+    except auth.ResetFailed as refused:
+        analytics.spawn(analytics.record_auth_event("reset_failed", username_tried=tried, reason=refused.reason, client_ip=ip))
+        raise
+    analytics.spawn(analytics.record_auth_event("reset_ok", username_tried=tried, user_id=result.user.id, client_ip=ip))
+    return result
+
+
 class FeedbackRequest(BaseModel):
     turn_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
     rating: int = Field(ge=-1, le=1)  # 1 thumbs up, -1 thumbs down, 0 clears the vote
@@ -298,7 +342,20 @@ async def news_status():
 
 
 
-app.mount("/mcp", auth.require_token(mcp.http_app(path="/")))
+def mcp_http_app(inner=None):
+    """The MCP server over HTTP: a valid token and the per-user MCP rate limit on every request."""
+    return auth.require_token(
+        inner if inner is not None else mcp.http_app(path="/"),
+        on_user=lambda user: ratelimit.mcp_limiter.check(user.id),
+    )
+
+
+# Off by default. The web app never uses /mcp, and it exposes every tool directly to any
+# signed-in user (sign-up is open), including crawl_news and the RapidAPI railway tools,
+# outside the chat rate limit. Turn it on only for an MCP client you run yourself.
+MCP_HTTP_ENABLED = os.getenv("MCP_HTTP_ENABLED", "false").strip().lower() in ("true", "1", "yes")
+if MCP_HTTP_ENABLED:
+    app.mount("/mcp", mcp_http_app())
 
 
 @app.post("/chat", dependencies=[Depends(ratelimit.limit_chat)])
@@ -309,6 +366,16 @@ async def chat_endpoint(request: ChatRequest, user: auth.User = Depends(auth.cur
         if not user_text:
             log.warning("chat request with empty message")
             return JSONResponse(status_code=400, content={"error": "No input"})
+        # Every character goes to the model and is billed, so cap what one message can cost.
+        if len(user_text) > MAX_MESSAGE_CHARS:
+            log.warning("chat message too long: %d chars", len(user_text))
+            return JSONResponse(status_code=400, content={
+                "error": f"Your message is too long ({len(user_text)} characters). "
+                         f"Please keep it under {MAX_MESSAGE_CHARS} characters."
+            })
+        if request.thread_id is not None and not _THREAD_ID.fullmatch(request.thread_id):
+            log.warning("chat request with an invalid thread id")
+            return JSONResponse(status_code=400, content={"error": "Invalid conversation id."})
 
 
 
@@ -353,11 +420,22 @@ async def chat_endpoint(request: ChatRequest, user: auth.User = Depends(auth.cur
                 ),
             )
 
+        edit = {}
+        if request.edit_index is not None:
+            edit = {"edit_index": request.edit_index, "edit_original": request.edit_original}
+            log.info("chat edit of message %d on thread %s", request.edit_index, thread_id)
+
         try:
             with agent.record_turn() as turn:
                 text_content = await agent.agent_chat(
-                    user_text, thread_id=thread_id, user_id=user.id, username=user.username
+                    user_text, thread_id=thread_id, user_id=user.id, username=user.username, **edit
                 )
+        except agent.EditConflict as conflict:
+            # Checked before the agent runs, so nothing happened: no turn to record.
+            log.warning("chat edit refused on thread %s: %s", thread_id, conflict)
+            return JSONResponse(status_code=409, content={
+                "error": "That message can't be edited any more: the chat has changed. Reopen the chat and try again."
+            })
         except Exception as routing_error:
             if is_db_unavailable(routing_error):
                 # The agent may already have run (e.g. the final save failed), so a
@@ -373,8 +451,11 @@ async def chat_endpoint(request: ChatRequest, user: auth.User = Depends(auth.cur
                     output=fallback_text,
                     error=f"quota/rate limit: {routing_error}",
                 )
-            log.exception("chat agent failed: %s", routing_error)
-            return recorded({"error": str(routing_error)}, output=None, error=str(routing_error), status_code=500)
+            # The full error goes to the log and the analytics row; the browser gets a plain
+            # message plus a reference, because exception text can carry internal details
+            # (hostnames, SQL, file paths, upstream API responses).
+            log.exception("chat agent failed (turn %s): %s", turn_id, routing_error)
+            return recorded({"error": _internal_error_message(turn_id)}, output=None, error=str(routing_error), status_code=500)
 
         log.info("chat reply (%d chars): %r", len(text_content), redact(text_content, 120))
 
@@ -386,8 +467,9 @@ async def chat_endpoint(request: ChatRequest, user: auth.User = Depends(auth.cur
 
         raise
     except Exception as error:
-        log.exception("chat endpoint failed: %s", error)
-        return JSONResponse(status_code=500, content={"error": str(error)})
+        reference = uuid.uuid4().hex[:8]
+        log.exception("chat endpoint failed (ref %s): %s", reference, error)
+        return JSONResponse(status_code=500, content={"error": _internal_error_message(reference)})
 
 
 if __name__ == "__main__":

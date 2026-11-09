@@ -16,8 +16,12 @@ provider later means replacing `current_user` and leaving the rest alone.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import os
 import re
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -139,6 +143,17 @@ async def setup(pool) -> None:
         # deleting one only stamps deleted_at -- the chat is hidden, never erased.
         await conn.execute("ALTER TABLE threads ADD COLUMN IF NOT EXISTS title text")
         await conn.execute("ALTER TABLE threads ADD COLUMN IF NOT EXISTS deleted_at timestamptz")
+        # One live password-reset code per user (see request_password_reset).
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS password_resets (
+                user_id    text PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                code_hash  text NOT NULL,
+                expires_at timestamptz NOT NULL,
+                attempts   integer NOT NULL DEFAULT 0
+            )
+            """
+        )
     if not JWT_SECRET:
         raise RuntimeError(
             "JWT_SECRET is not set. Generate one with `python -c \"import "
@@ -235,6 +250,115 @@ async def login(creds: LoginRequest) -> TokenResponse:
     return TokenResponse(access_token=create_token(user), user=user)
 
 
+# --------------------------------------------------------------------------- password reset
+#
+# There is no mail service, so the one-time code goes to the backend's console and
+# log (deliver_reset_code), which only whoever runs the server can read. On a real
+# deployment, replace deliver_reset_code with an email to the account's address.
+# The code is random (about 40 bits), lives RESET_CODE_MINUTES, allows
+# RESET_MAX_ATTEMPTS guesses and works once; only its SHA-256 is stored.
+
+RESET_CODE_MINUTES = int(os.getenv("RESET_CODE_MINUTES", "15"))
+RESET_MAX_ATTEMPTS = 5
+_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no 0/O or 1/I/L to misread
+
+
+class ForgotPasswordRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=254)  # username or email
+
+
+class ResetPasswordRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=254)
+    code: str = Field(min_length=1, max_length=20)
+    password: str = Field(min_length=MIN_PASSWORD_CHARS)
+
+
+class ResetFailed(HTTPException):
+    """Wrong, expired or used-up code, or no such account: one message for all, so
+    the reply never confirms which accounts exist; `reason` is for analytics."""
+
+    def __init__(self, reason: str):
+        super().__init__(status.HTTP_400_BAD_REQUEST, "That reset code is wrong or has expired. Request a new one.")
+        self.reason = reason
+
+
+def _code_hash(code: str) -> str:
+    cleaned = re.sub(r"[^A-Z0-9]", "", code.upper())
+    return hashlib.sha256(cleaned.encode("ascii", "ignore")).hexdigest()
+
+
+def _new_code() -> str:
+    raw = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(8))
+    return f"{raw[:4]}-{raw[4:]}"
+
+
+def deliver_reset_code(username: str, code: str) -> None:
+    """Show the code to whoever runs the backend (its console window and log file)."""
+    log.warning(
+        "\n%s\n  PASSWORD RESET CODE for %s:  %s   (valid %d minutes, one use)\n%s",
+        "=" * 64, username, code, RESET_CODE_MINUTES, "=" * 64,
+    )
+
+
+async def _find_account(conn, identifier: str):
+    return await (
+        await conn.execute(
+            "SELECT id, username, email, password_hash FROM users WHERE username = %s OR email = %s LIMIT 1",
+            (identifier, identifier),
+        )
+    ).fetchone()
+
+
+async def request_password_reset(identifier: str) -> str | None:
+    """Issue a new code for the account (replacing any earlier one). Returns the
+    user id, or None for an unknown account; callers answer both the same way."""
+    identifier = identifier.strip().lower()
+    async with _pool.connection() as conn:
+        row = await _find_account(conn, identifier)
+        if not row:
+            log.warning("password reset asked for unknown account %s", redact(identifier))
+            return None
+        code = _new_code()
+        await conn.execute(
+            "INSERT INTO password_resets (user_id, code_hash, expires_at, attempts) "
+            "VALUES (%s, %s, now() + make_interval(mins => %s), 0) "
+            "ON CONFLICT (user_id) DO UPDATE SET code_hash = EXCLUDED.code_hash, "
+            "expires_at = EXCLUDED.expires_at, attempts = 0",
+            (row["id"], _code_hash(code), RESET_CODE_MINUTES),
+        )
+    deliver_reset_code(row["username"] or row["email"], code)
+    return row["id"]
+
+
+async def reset_password(req: ResetPasswordRequest) -> TokenResponse:
+    """Check the code, set the new password, and sign the user in."""
+    identifier = req.username.strip().lower()
+    new_hash = hash_password(req.password)  # checks the length before touching the code
+    async with _pool.connection() as conn:
+        row = await _find_account(conn, identifier)
+        if not row:
+            raise ResetFailed("unknown user")
+        reset = await (
+            await conn.execute(
+                "SELECT code_hash, expires_at < now() AS expired, attempts FROM password_resets WHERE user_id = %s",
+                (row["id"],),
+            )
+        ).fetchone()
+        if not reset:
+            raise ResetFailed("no code requested")
+        if reset["expired"] or reset["attempts"] >= RESET_MAX_ATTEMPTS:
+            await conn.execute("DELETE FROM password_resets WHERE user_id = %s", (row["id"],))
+            raise ResetFailed("code expired" if reset["expired"] else "too many attempts")
+        if not hmac.compare_digest(reset["code_hash"], _code_hash(req.code)):
+            await conn.execute("UPDATE password_resets SET attempts = attempts + 1 WHERE user_id = %s", (row["id"],))
+            raise ResetFailed("wrong code")
+        await conn.execute("UPDATE users SET password_hash = %s WHERE id = %s", (new_hash, row["id"]))
+        await conn.execute("DELETE FROM password_resets WHERE user_id = %s", (row["id"],))
+    user = User(id=row["id"], username=row["username"] or row["email"], email=row["email"])
+    log.info("password reset for %s", redact(user.username))
+    return TokenResponse(access_token=create_token(user), user=user)
+
+
 async def current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> User:
@@ -271,12 +395,23 @@ def decode_token(token: str) -> User:
     return User(id=user_id, username=username, email=payload.get("email"))
 
 
-def require_token(app):
+def require_token(app, on_user=None):
     """Wrap a mounted ASGI app so every HTTP request needs a valid bearer token.
 
     Mounted sub-apps sit outside FastAPI's dependency system, so `current_user`
-    cannot guard them; this does the same check at the ASGI layer.
+    cannot guard them; this does the same check at the ASGI layer. `on_user`, if
+    given, is called with the verified user and may refuse the request by raising
+    an HTTPException (e.g. a 429 from a rate limiter).
     """
+
+    async def refuse(send, status_code: int, detail: str, headers: dict | None = None):
+        await send({
+            "type": "http.response.start",
+            "status": status_code,
+            "headers": [(b"content-type", b"application/json")]
+            + [(k.lower().encode("latin-1"), str(v).encode("latin-1")) for k, v in (headers or {}).items()],
+        })
+        await send({"type": "http.response.body", "body": json.dumps({"detail": detail}).encode("utf-8")})
 
     async def guarded(scope, receive, send):
         if scope["type"] != "http":
@@ -287,18 +422,16 @@ def require_token(app):
         try:
             if scheme.lower() != "bearer" or not token:
                 raise jwt.InvalidTokenError("missing bearer token")
-            decode_token(token)
+            user = decode_token(token)
         except jwt.InvalidTokenError:
-            await send({
-                "type": "http.response.start",
-                "status": 401,
-                "headers": [
-                    (b"content-type", b"application/json"),
-                    (b"www-authenticate", b"Bearer"),
-                ],
-            })
-            await send({"type": "http.response.body", "body": b'{"detail":"Not authenticated."}'})
+            await refuse(send, 401, "Not authenticated.", {"WWW-Authenticate": "Bearer"})
             return
+        if on_user is not None:
+            try:
+                on_user(user)
+            except HTTPException as refused:
+                await refuse(send, refused.status_code, str(refused.detail), refused.headers)
+                return
         await app(scope, receive, send)
 
     return guarded
