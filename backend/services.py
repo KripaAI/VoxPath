@@ -330,12 +330,17 @@ def get_latest_news(
     """
     category = (category or "").strip().lower() or None
     topic = (topic or "").strip() or None
+    region = (region or "").strip() or None
     if category and category not in news_config.CATEGORIES:
         topic = " ".join(filter(None, [topic, category]))  # e.g. "cricket": search for it instead
         category = None
+    if region and category in ("india", "regional"):
+        # The region already picks the papers: Bihar papers are "regional" and
+        # national papers "india", so either one would hide half of them.
+        category = None
     filters = {
         "topic": topic,
-        "region": (region or "").strip() or None,
+        "region": region,
         "category": category,
         "language": _LANGUAGES.get((language or "").strip().lower()),
     }

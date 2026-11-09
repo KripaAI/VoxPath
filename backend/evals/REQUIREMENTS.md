@@ -106,3 +106,48 @@ ignore `not_saved` calls), or the attempts themselves are unwanted (then add one
 line and measure it as a separate change). The `answers_question` judge also fails this
 turn because the user made a statement without a question; its rubric doesn't say what
 "answered" means for a statement: a rubric gap to clarify and re-validate.
+
+### 2026-11-09: judge labels reviewed by the owner
+
+All 68 rows in `judge_labels.jsonl` are now signed off by krish: 6 ruled individually
+(`labelled_by: "krish"`), 62 accepted as proposed (`"krish (accepted proposal)"`).
+Rulings for R12 (`answers_question`):
+
+- A polite refusal of something VoxPath cannot do is ANSWERED; scope is R11's job.
+- Asking for a detail that is genuinely missing is ANSWERED (consistent with R4).
+- A partial answer fails: a silently dropped part (ans-n-03), or one off-topic item in a
+  list, whatever feed it came from (ans-r-11, ans-r-12 flipped to NOT_ANSWERED). The
+  rubric now says so explicitly.
+
+Validation after the review (gpt-4.1): held-out 18/18 and dev 50/50 agree with the owner.
+ans-r-11 and ans-r-12 point at a product issue: NDTV Profit's feed is filed as
+"business", so its cricket gossip is served as business news.
+
+### 2026-11-09: news data fixes from the full run
+
+Full run `full-no-rail-x3` (31 cases x3, judges): 26/31 pass^k. news-008, news-009 and
+news-010 failed `answers_question` 3/3 on the news data, not the agent:
+- NDTV Profit's feed is its general one (train crashes, Israel, films, IPL) and was filed
+  as business. It now keeps only stories under its markets, business, economy and
+  personal-finance URL sections (`link_sections` in `news_config.py`), also for
+  headlines already saved.
+- The politics theme matched everyday government news ("CM opens Deepotsav", "Govt sets
+  Rabi target"). It now uses only clear political signals: parties, elections,
+  legislatures, politicians.
+
+Re-run `news-fixes-x3` (11 news cases x3): 10/11 pass^k; news-008, 009, 010 pass 3/3.
+news-007 still fails 1/3 (skips search_memories; scope judge flags "saved ... for future
+news updates"): open.
+
+### 2026-11-09: English questions get English news
+
+Production trace 5573e90e ("pls give me top 10 news for today?") passed every check, but
+the agent called get_latest_news with `{"limit": 10}` only, ignoring the prompt's "set
+language to the language the user is writing in", and Hindi headlines came back in an
+English reply. No evaluator looked at the language filter: an evaluator gap.
+
+- Fix in code (`agent._with_news_language_default`): a get_latest_news call without a
+  language gets the user's own, `hi` for Devanagari and `en` otherwise. A language the
+  model passes (e.g. "show me Hindi news", or `hi` for Hinglish) is kept.
+- New case news-011 (`source: production`) checks `language: en`; `news-language-x3`:
+  3/3. All news cases 11/12 pass^k; news-007 is the open item.

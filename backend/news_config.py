@@ -185,7 +185,12 @@ SOURCES = [
         "category": "business",
         "type": "rss",
         "url": "https://feeds.feedburner.com/ndtvprofit-latest",
-        "max_items": 20,
+        # This is NDTV Profit's general feed (sport, world, films too) and it has no
+        # markets-only feed, so keep just the stories filed under these site sections.
+        "link_sections": ("markets", "business", "economy", "personal-finance"),
+        # ...and its /business/ section also carries film box-office reports.
+        "link_exclude": ("entertainment", "box-office"),
+        "max_items": 40,
     },
     {
         "name": "Mint Markets",

@@ -19,11 +19,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from langchain_core.callbacks import get_usage_metadata_callback
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 from langchain_core.messages.utils import trim_messages
 from langchain_core.tools import StructuredTool
 from langgraph.prebuilt import create_react_agent
 
+import hindi_names
 import memory
 import services
 import tracing
@@ -49,7 +50,10 @@ SYSTEM_PROMPT = (
     "the user gives a city name, call resolve_station_code first. If a required "
     "detail (PNR, train number, stations, date) is missing, ask for it. "
     "News: for news about a state or city (e.g. Bihar, Patna, Uttar Pradesh), "
-    "pass it as region to get_latest_news. When the user asks for news without "
+    "pass it as region to get_latest_news; when they name a kind of news "
+    "(political, sports, business...), pass that kind as category, e.g. "
+    "'top political news from Bihar' is region 'Bihar', category 'politics'. "
+    "When the user asks for news without "
     "saying which kind, first call search_memories for their news preferences "
     "(topics, categories, language, region) and pass them to get_latest_news as "
     "region, category, topic and language; "
@@ -106,6 +110,45 @@ _saver = None
 _store = None
 # What the current chat turn did, when someone is recording it (see record_turn).
 _current_turn: contextvars.ContextVar[TurnRecord | None] = contextvars.ContextVar("current_turn", default=None)
+# The user's message for the turn being answered (set by agent_chat), so tools can
+# default to the language the user wrote in.
+_user_message: contextvars.ContextVar[str | None] = contextvars.ContextVar("user_message", default=None)
+
+
+def _user_language() -> str | None:
+    """'hi' if the user wrote in Devanagari, 'en' otherwise; None outside a chat turn."""
+    message = _user_message.get()
+    if message is None:
+        return None
+    return "hi" if hindi_names.has_devanagari(message) else "en"
+
+
+def _with_news_language_default(fn):
+    """get_latest_news without a language gets the user's own: an English question
+    gets English headlines. The prompt asks the model for this, but it doesn't always
+    pass it. An explicit language ("news in Hindi") is left alone."""
+
+    def fill(kwargs: dict) -> dict:
+        if not kwargs.get("language"):
+            language = _user_language()
+            if language:
+                kwargs = {**kwargs, "language": language}
+        return kwargs
+
+    if inspect.iscoroutinefunction(fn):
+
+        @functools.wraps(fn)
+        async def filled_async(*args, **kwargs):
+            return await fn(*args, **fill(kwargs))
+
+        return filled_async
+
+    @functools.wraps(fn)
+    def filled(*args, **kwargs):
+        return fn(*args, **fill(kwargs))
+
+    return filled
+
 TOOL_OUTPUT_PREVIEW_CHARS = 1000
 
 
@@ -331,6 +374,9 @@ async def _build_agent():
 
 
         fn = _with_call_logging(name, tool.fn)
+        if name == "get_latest_news":
+            # Outside the logging wrapper, so the log shows the language actually used.
+            fn = _with_news_language_default(fn)
         if inspect.iscoroutinefunction(fn):
             lc_tool = StructuredTool.from_function(
                 coroutine=fn, name=name, description=tool.description
@@ -358,8 +404,34 @@ async def _build_agent():
     )
 
 
+class EditConflict(Exception):
+    """The message being edited is not where the browser thinks it is (the chat
+    changed in another tab, or the turn never reached the saved conversation)."""
+
+
+async def _edit_removals(config: dict, edit_index: int, edit_original: str | None) -> list:
+    """RemoveMessage for the user's edit_index-th message (0-based, counting only
+    their own messages) and everything after it, so the edited message takes its
+    place and the agent forgets the old version and the answers that followed."""
+    state = await _agent.aget_state(config)
+    messages = state.values.get("messages", []) if state else []
+    positions = [i for i, m in enumerate(messages) if isinstance(m, HumanMessage)]
+    if edit_index >= len(positions):
+        raise EditConflict(f"message {edit_index} not found ({len(positions)} saved)")
+    start = positions[edit_index]
+    if edit_original is not None and str(messages[start].content) != edit_original:
+        raise EditConflict(f"message {edit_index} has different text")
+    return [RemoveMessage(id=m.id) for m in messages[start:]]
+
+
 async def agent_chat(
-    message: str, thread_id: str | None = None, user_id: str | None = None, username: str | None = None
+    message: str,
+    thread_id: str | None = None,
+    user_id: str | None = None,
+    username: str | None = None,
+    *,
+    edit_index: int | None = None,
+    edit_original: str | None = None,
 ) -> str:
     """Run one text turn through the LangGraph agent; return the reply text.
 
@@ -367,6 +439,11 @@ async def agent_chat(
     user's internal id, scopes long-term memory (every conversation that person
     has had) and is what the memory tools read from the config. username is only
     used to label traces so the user is recognisable there.
+
+    edit_index replaces one of the user's earlier messages instead of adding a
+    new one: that message and everything after it are dropped from the saved
+    conversation in the same step that adds the new text (see _edit_removals).
+    edit_original, when given, must match the saved text of that message.
     """
     if _agent is None:
         raise RuntimeError(
@@ -378,6 +455,11 @@ async def agent_chat(
             "user_id": user_id or memory.DEFAULT_USER_ID,
         }
     }
+    removals = []
+    if edit_index is not None:
+        if _saver is None:
+            raise EditConflict("no saved conversations to edit")
+        removals = await _edit_removals(config, edit_index, edit_original)
     with (
         tracing.trace_context(
             config["configurable"]["thread_id"],
@@ -390,15 +472,17 @@ async def agent_chat(
         get_usage_metadata_callback() as usage,
         memory.write_policy(),
     ):
+        message_token = _user_message.set(message)
         try:
             # durability="exit": save the conversation once when the turn finishes rather
             # than after every graph step. Each save is a round trip to the remote
             # database, and per-step saves cost ~2 s of a chat turn; the stored
             # history is the same. A crash mid-turn loses only that unfinished turn.
             result = await _agent.ainvoke(
-                {"messages": [HumanMessage(content=message)]}, config=config, durability="exit"
+                {"messages": [*removals, HumanMessage(content=message)]}, config=config, durability="exit"
             )
         finally:
+            _user_message.reset(message_token)
             _note_usage(usage.usage_metadata, trace.get("trace_id"))
     final = result["messages"][-1]
     content = final.content

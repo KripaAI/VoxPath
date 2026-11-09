@@ -18,6 +18,9 @@ import {
   Loader2,
   ThumbsUp,
   ThumbsDown,
+  Copy,
+  Check,
+  Pencil,
 } from 'lucide-react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -39,7 +42,12 @@ interface Message {
   /** Set on answers from /chat this session; lets the user rate the answer. */
   turnId?: string;
   feedback?: 1 | -1;
+  /** A user message whose turn failed: it never reached the saved conversation. */
+  failed?: boolean;
 }
+
+/** Replace the user's earlier message `index` (0 = their first saved message). */
+type EditRequest = { index: number; original: string; at: number };
 
 const starterPrompts = [
   {
@@ -93,8 +101,12 @@ class BackendUnreachableError extends Error {
   }
 }
 
-const MESSAGES_KEY = 'voxpath_chat_messages';
-const THREAD_KEY = 'voxpath_thread_id';
+/**
+ * Keys older versions used to keep the open chat in the browser. Every load now
+ * starts a new chat (saved chats are in the sidebar), so they are only removed:
+ * left behind, they also showed one account's messages to the next sign-in.
+ */
+const LEGACY_KEYS = ['voxpath_chat_messages', 'voxpath_thread_id'];
 const PAGE_SIZE = 20; // chats per sidebar page
 const MAX_PAGE = 200; // the backend's largest allowed limit
 
@@ -122,6 +134,9 @@ function ChatContent({ user, onSignOut }: ChatProps) {
   const [status, setStatus] = useState<'Ready' | 'Processing' | 'Reconnecting'>('Ready');
   const [error, setError] = useState<string | null>(null);
   const [draftMessage, setDraftMessage] = useState('');
+  // Editing a sent message in place: which one (its index in `messages`) and the text.
+  const [editingAt, setEditingAt] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState('');
 
   // Sidebar: the user's saved chats, and which one is open.
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
@@ -140,21 +155,11 @@ function ChatContent({ user, onSignOut }: ChatProps) {
   // left must not overwrite the one now on screen.
   const openSeq = useRef(0);
 
-  // The thread id identifies this browser's conversation; the transcript itself
-  // lives in Postgres behind it. Resolved on first use, not during render.
+  // The thread id identifies the open conversation; the transcript lives in
+  // Postgres behind it. A new chat gets one on its first message.
   const getThreadId = useCallback(() => {
     if (threadIdRef.current) return threadIdRef.current;
-    let id: string | null = null;
-    try {
-      id = localStorage.getItem(THREAD_KEY);
-      if (!id) {
-        id = newThreadId();
-        localStorage.setItem(THREAD_KEY, id);
-      }
-    } catch {
-      // Private mode or blocked storage: fall back to a per-tab thread.
-      id = id || newThreadId();
-    }
+    const id = newThreadId();
     threadIdRef.current = id;
     setActiveId(id);
     return id;
@@ -191,6 +196,7 @@ function ChatContent({ user, onSignOut }: ChatProps) {
   const startNewChat = useCallback(() => {
     openSeq.current++; // drop any chat still loading
     setMessages([INITIAL_WELCOME]);
+    setEditingAt(null);
     setOpeningChat(false);
     setError(null);
     setSidebarOpen(false);
@@ -198,12 +204,6 @@ function ChatContent({ user, onSignOut }: ChatProps) {
     // agent still replays the old conversation from Postgres.
     threadIdRef.current = null;
     setActiveId(null);
-    try {
-      localStorage.removeItem(MESSAGES_KEY);
-      localStorage.removeItem(THREAD_KEY);
-    } catch {
-      // Ignore
-    }
   }, []);
 
   // Make `id` the current chat and show its messages from the server.
@@ -212,11 +212,7 @@ function ChatContent({ user, onSignOut }: ChatProps) {
       const seq = ++openSeq.current;
       threadIdRef.current = id;
       setActiveId(id);
-      try {
-        localStorage.setItem(THREAD_KEY, id);
-      } catch {
-        // Ignore
-      }
+      setEditingAt(null);
       setOpeningChat(true);
       setError(null);
       try {
@@ -232,8 +228,7 @@ function ChatContent({ user, onSignOut }: ChatProps) {
           setConversations((prev) => prev.filter((chat) => chat.id !== id));
           startNewChat();
         } else if (!(openFailure instanceof ApiError && openFailure.status === 0)) {
-          // Backend unreachable (status 0) is already shown in the header; the
-          // browser's copy of the chat stays on screen meanwhile.
+          // Backend unreachable (status 0) is already shown in the header.
           setError(`Couldn't open that chat: ${openFailure instanceof Error ? openFailure.message : 'unknown error'}`);
         }
       } finally {
@@ -243,18 +238,15 @@ function ChatContent({ user, onSignOut }: ChatProps) {
     [onSignOut, startNewChat]
   );
 
-  // On load: fetch the chat list, and refresh the open chat from the server
-  // (the browser's saved copy shows instantly, then the server's replaces it).
+  // On load: a new, empty chat, and the saved chats in the sidebar.
   useEffect(() => {
     void fetchConversations(0, PAGE_SIZE);
-    let savedId: string | null = null;
     try {
-      savedId = localStorage.getItem(THREAD_KEY);
+      LEGACY_KEYS.forEach((key) => localStorage.removeItem(key));
     } catch {
-      // Ignore
+      // Private mode or blocked storage: nothing was saved there either.
     }
-    if (savedId) void showConversation(savedId);
-  }, [fetchConversations, showConversation]);
+  }, [fetchConversations]);
 
   const selectConversation = (id: string) => {
     setSidebarOpen(false);
@@ -282,32 +274,6 @@ function ChatContent({ user, onSignOut }: ChatProps) {
     // A hidden chat can't take new messages, so leave it if it is open.
     if (id === threadIdRef.current) startNewChat();
   };
-
-  // Load local storage history on mount
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem(MESSAGES_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          setMessages(parsed);
-        }
-      }
-    } catch {
-      // Ignore localStorage errors
-    }
-  }, []);
-
-  // Save messages to local storage whenever they change
-  useEffect(() => {
-    if (messages.length > 0) {
-      try {
-        localStorage.setItem(MESSAGES_KEY, JSON.stringify(messages));
-      } catch {
-        // Ignore quota/storage errors
-      }
-    }
-  }, [messages]);
 
   // Check backend health
   const checkHealth = useCallback(async () => {
@@ -378,18 +344,77 @@ function ChatContent({ user, onSignOut }: ChatProps) {
     }
   };
 
-  const sendTextMessage = async (customPrompt?: string) => {
+  // Copy a message's text. navigator.clipboard needs a secure context (localhost
+  // or https); a plain-http LAN address falls back to the older copy command.
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const copyMessage = async (index: number, text: string) => {
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    } catch {
+      const scratch = document.createElement('textarea');
+      scratch.value = text;
+      scratch.setAttribute('readonly', '');
+      scratch.style.position = 'fixed';
+      scratch.style.opacity = '0';
+      document.body.appendChild(scratch);
+      scratch.select();
+      try {
+        copied = document.execCommand('copy');
+      } catch {
+        copied = false;
+      }
+      scratch.remove();
+    }
+    if (!copied) {
+      setError("Couldn't copy to the clipboard.");
+      return;
+    }
+    setCopiedIndex(index);
+    window.setTimeout(() => setCopiedIndex((current) => (current === index ? null : current)), 1500);
+  };
+
+  const startEditing = (at: number) => {
+    setEditingAt(at);
+    setEditDraft(messages[at].content);
+  };
+
+  const cancelEditing = () => setEditingAt(null);
+
+  // Send the edited text in place of the original. The original and everything
+  // after it go, here and in the saved chat, and the edit gets a fresh answer.
+  const submitEdit = () => {
+    if (editingAt === null) return;
+    const original = messages[editingAt];
+    const text = editDraft.trim();
+    setEditingAt(null);
+    if (!text || text === original.content) return;
+    if (original.failed) {
+      // Never saved, so there is nothing to replace on the server: send it anew.
+      void sendTextMessage(text, { at: editingAt });
+      return;
+    }
+    // Its position among the user's saved messages (failed ones never got there).
+    const index = messages.slice(0, editingAt).filter((m) => m.role === 'user' && !m.failed).length;
+    void sendTextMessage(text, { index, original: original.content, at: editingAt });
+  };
+
+  const sendTextMessage = async (customPrompt?: string, edit?: EditRequest | { at: number }) => {
     const textToSend = (customPrompt || draftMessage).trim();
     if (!textToSend || isBusy.current || openingChat) return;
 
     isBusy.current = true;
-    setDraftMessage('');
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
+    if (!edit) {
+      setDraftMessage('');
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+      }
     }
+    const replacing = edit && 'index' in edit ? edit : null;
 
     const userMsg: Message = { role: 'user', content: textToSend };
-    setMessages((prev) => [...prev, userMsg]);
+    setMessages((prev) => [...(edit ? prev.slice(0, edit.at) : prev), userMsg]);
     setIsThinking(true);
     setStatus('Processing');
     setError(null);
@@ -405,6 +430,7 @@ function ChatContent({ user, onSignOut }: ChatProps) {
             body: JSON.stringify({
               message: textToSend,
               thread_id: getThreadId(),
+              ...(replacing ? { edit_index: replacing.index, edit_original: replacing.original } : {}),
             }),
           });
         } catch {
@@ -458,9 +484,15 @@ function ChatContent({ user, onSignOut }: ChatProps) {
     } catch (backendError) {
       console.error('Backend fetch error:', backendError);
       const msg = backendError instanceof Error ? backendError.message : 'Something went wrong.';
+      if (replacing && threadIdRef.current) {
+        // The saved chat was not changed: show it as it really is again.
+        await showConversation(threadIdRef.current);
+        setError(msg);
+        return;
+      }
       setError(msg);
       setMessages((prev) => [
-        ...prev,
+        ...prev.map((m) => (m === userMsg ? { ...m, failed: true } : m)),
         {
           role: 'assistant',
           content:
@@ -586,7 +618,64 @@ function ChatContent({ user, onSignOut }: ChatProps) {
 
             <div
               className={cn(
-                'max-w-[85%] rounded-2xl px-5 py-3.5 text-sm leading-relaxed shadow-sm',
+                'group/msg flex min-w-0 flex-col gap-1',
+                editingAt === i ? 'w-full max-w-[85%]' : 'max-w-[85%]',
+                msg.role === 'user' ? 'items-end' : 'items-start'
+              )}
+            >
+            {editingAt === i ? (
+              <form
+                className="w-full rounded-2xl border border-violet-400/40 bg-white/5 p-3 shadow-sm"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  submitEdit();
+                }}
+              >
+                <textarea
+                  autoFocus
+                  value={editDraft}
+                  maxLength={MAX_MESSAGE_CHARS}
+                  rows={Math.min(Math.max(editDraft.split('\n').length, 2), 8)}
+                  onChange={(e) => setEditDraft(e.target.value)}
+                  onFocus={(e) => e.currentTarget.setSelectionRange(e.currentTarget.value.length, e.currentTarget.value.length)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      e.preventDefault();
+                      cancelEditing();
+                    } else if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      submitEdit();
+                    }
+                  }}
+                  aria-label="Edit your message"
+                  className="w-full resize-none bg-transparent text-sm text-slate-100 outline-none custom-scrollbar"
+                />
+                <div className="mt-2 flex items-center justify-between gap-2">
+                  <span className="text-[11px] text-slate-400">
+                    Sending replaces this message and the replies after it.
+                  </span>
+                  <div className="flex flex-shrink-0 gap-2">
+                    <button
+                      type="button"
+                      onClick={cancelEditing}
+                      className="rounded-lg border border-white/15 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-white/10"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={!editDraft.trim() || editDraft.trim() === msg.content || isThinking}
+                      className="btn-gradient rounded-lg px-3 py-1.5 text-xs font-semibold disabled:opacity-40"
+                    >
+                      Send
+                    </button>
+                  </div>
+                </div>
+              </form>
+            ) : (
+            <div
+              className={cn(
+                'max-w-full rounded-2xl px-5 py-3.5 text-sm leading-relaxed shadow-sm',
                 msg.role === 'assistant'
                   ? 'surface-card text-slate-100 border border-white/10'
                   : 'bg-gradient-to-br from-violet-600/90 to-indigo-600/90 text-white'
@@ -597,9 +686,22 @@ function ChatContent({ user, onSignOut }: ChatProps) {
                   <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
                     {msg.content}
                   </ReactMarkdown>
-                  {msg.turnId && (
-                    <div className="not-prose mt-2 flex gap-1" role="group" aria-label="Rate this answer">
-                      {([1, -1] as const).map((value) => {
+                  {i > 0 && (
+                    <div className="not-prose mt-2 flex gap-1" role="group" aria-label="Answer actions">
+                      <button
+                        type="button"
+                        onClick={() => void copyMessage(i, msg.content)}
+                        aria-label={copiedIndex === i ? 'Copied' : 'Copy answer'}
+                        title={copiedIndex === i ? 'Copied' : 'Copy answer'}
+                        className="rounded-md p-1.5 text-slate-500 transition-colors hover:bg-white/10 hover:text-slate-200"
+                      >
+                        {copiedIndex === i ? (
+                          <Check size={13} className="text-emerald-400" aria-hidden="true" />
+                        ) : (
+                          <Copy size={13} aria-hidden="true" />
+                        )}
+                      </button>
+                      {msg.turnId && ([1, -1] as const).map((value) => {
                         const Icon = value === 1 ? ThumbsUp : ThumbsDown;
                         const chosen = msg.feedback === value;
                         return (
@@ -623,8 +725,43 @@ function ChatContent({ user, onSignOut }: ChatProps) {
                   )}
                 </div>
               ) : (
-                <p className="whitespace-pre-wrap">{msg.content}</p>
+                <p className="whitespace-pre-wrap break-words">{msg.content}</p>
               )}
+            </div>
+            )}
+            {msg.role === 'user' && editingAt !== i && (
+              // Faint until the message is hovered or a button has focus; always
+              // there on touch screens, where nothing hovers.
+              <div
+                className="flex gap-1 opacity-60 transition-opacity focus-within:opacity-100 group-hover/msg:opacity-100"
+                role="group"
+                aria-label="Message actions"
+              >
+                <button
+                  type="button"
+                  onClick={() => void copyMessage(i, msg.content)}
+                  aria-label={copiedIndex === i ? 'Copied' : 'Copy message'}
+                  title={copiedIndex === i ? 'Copied' : 'Copy message'}
+                  className="rounded-md p-1.5 text-slate-500 transition-colors hover:bg-white/10 hover:text-slate-200"
+                >
+                  {copiedIndex === i ? (
+                    <Check size={13} className="text-emerald-400" aria-hidden="true" />
+                  ) : (
+                    <Copy size={13} aria-hidden="true" />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => startEditing(i)}
+                  disabled={isThinking || openingChat}
+                  aria-label="Edit message"
+                  title="Edit and send again"
+                  className="rounded-md p-1.5 text-slate-500 transition-colors hover:bg-white/10 hover:text-slate-200 disabled:opacity-40"
+                >
+                  <Pencil size={13} aria-hidden="true" />
+                </button>
+              </div>
+            )}
             </div>
           </div>
         ))}

@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- Source of VOXPATH_ARCHITECTURE.pdf. Rebuild: msedge --headless --print-to-pdf=docs/VOXPATH_ARCHITECTURE.pdf docs/VOXPATH_ARCHITECTURE.html -->
+<title>VoxPath Architecture</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+  /* Layout: one reading column; the diagram breaks out wider and scrolls sideways on phones. */
+  :root {
+    --bg: #f5f7fa;
+    --surface: #ffffff;
+    --zone: #e9eef4;
+    --ink: #16202b;
+    --ink2: #556274;
+    --line: #c3ccd7;
+    --accent: #a85a00;
+    --accent-soft: #fdf1e1;
+    --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0e1319; --surface: #17202a; --zone: #131a22; --ink: #e5eaf0; --ink2: #9ba7b5;
+      --line: #344251; --accent: #f2a33a; --accent-soft: #2a1f10; color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e1319; --surface: #17202a; --zone: #131a22; --ink: #e5eaf0; --ink2: #9ba7b5;
+    --line: #344251; --accent: #f2a33a; --accent-soft: #2a1f10; color-scheme: dark;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 16px;
+    line-height: 1.6;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 40px 64px;
+  }
+  .page { max-width: 1240px; margin: 0 auto; display: grid; gap: 40px; }
+  .prose { max-width: 68ch; min-width: 0; }
+  header { display: grid; gap: 10px; }
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--ink2);
+  }
+  h1 { font-size: clamp(28px, 4vw, 40px); line-height: 1.15; margin: 0; font-weight: 700; text-wrap: balance; }
+  h2 { font-size: 20px; margin: 0 0 12px; font-weight: 600; text-wrap: balance; }
+  p { margin: 0; }
+  .lede { color: var(--ink2); font-size: 17px; }
+  code { font-family: var(--font-mono); font-size: 0.88em; background: var(--zone); padding: 1px 5px; border-radius: 4px; }
+
+  figure { margin: 0; display: grid; gap: 14px; min-width: 0; }
+  .diagram-scroll {
+    overflow-x: auto; background: var(--surface); border: 1px solid var(--line);
+    border-radius: 12px; padding: 16px;
+  }
+  .diagram-scroll svg { display: block; width: 100%; min-width: 960px; height: auto; }
+  figcaption { color: var(--ink2); font-size: 14px; max-width: 80ch; }
+  .swatch { display: inline-block; width: 22px; height: 0; border-top: 2.5px solid var(--accent); vertical-align: middle; margin-right: 4px; }
+  .swatch.grey { border-top: 1.5px solid var(--ink2); }
+
+  /* SVG parts, styled from the page so both themes apply. */
+  .zone { fill: var(--zone); stroke: var(--line); stroke-width: 1; }
+  .zone-dashed { fill: none; stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 5 4; }
+  .box { fill: var(--surface); stroke: var(--line); stroke-width: 1.2; }
+  .box-accent { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.8; }
+  .t-title { fill: var(--ink); font: 600 14px var(--font-body); }
+  .t-body { fill: var(--ink2); font: 400 12px var(--font-body); }
+  .t-mono { fill: var(--ink2); font: 400 11px var(--font-mono); }
+  .t-zone { fill: var(--ink2); font: 600 11px var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; }
+  .t-label { fill: var(--ink2); font: 500 11px var(--font-body); }
+  .t-label-accent { fill: var(--accent); font: 600 11px var(--font-body); }
+  .flow { stroke: var(--ink2); stroke-width: 1.4; fill: none; }
+  .flow-accent { stroke: var(--accent); stroke-width: 2.2; fill: none; }
+  .ah { fill: var(--ink2); }
+  .ah-a { fill: var(--accent); }
+
+  ol.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; counter-reset: step; }
+  ol.steps li {
+    counter-increment: step; display: grid; grid-template-columns: 34px 1fr; gap: 12px; align-items: start;
+  }
+  ol.steps li::before {
+    content: counter(step); font-family: var(--font-mono); font-size: 13px; font-weight: 500;
+    width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
+    border: 1.5px solid var(--accent); color: var(--accent);
+  }
+  ol.steps li > div { min-width: 0; padding-top: 2px; }
+  ol.steps strong { font-weight: 600; }
+
+  .stores { width: 100%; border-collapse: collapse; font-size: 15px; }
+  .stores-wrap { overflow-x: auto; }
+  .stores th, .stores td { text-align: left; padding: 10px 12px 10px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .stores th { font-family: var(--font-mono); font-size: 12px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink2); }
+  .stores td:first-child { font-weight: 600; white-space: nowrap; }
+  .two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 40px; }
+  .two-col > section { min-width: 0; }
+
+  .route { display: grid; gap: 28px; }
+  .route > header { display: grid; gap: 8px; }
+  .t-lane { fill: var(--ink); font: 600 13px var(--font-body); }
+  .t-note { fill: var(--ink2); font: 400 11px var(--font-body); }
+  .lifeline { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 3 4; }
+  .flow-dashed { stroke: var(--ink2); stroke-width: 1.4; fill: none; stroke-dasharray: 5 4; }
+  .frame { fill: none; stroke: var(--accent); stroke-width: 1.2; stroke-dasharray: 6 4; }
+  .note { fill: var(--zone); stroke: var(--line); stroke-width: 1; }
+
+  .stages { display: grid; gap: 0; border-top: 1px solid var(--line); }
+  .stage {
+    display: grid; grid-template-columns: minmax(0, 150px) minmax(0, 1fr); gap: 8px 28px;
+    padding-block: 24px; border-bottom: 1px solid var(--line);
+  }
+  .stage-tag { font-family: var(--font-mono); font-size: 12px; color: var(--accent); letter-spacing: 0.04em; padding-top: 4px; }
+  .stage-body { display: grid; gap: 12px; min-width: 0; max-width: 72ch; }
+  .stage h3 { margin: 0; font-size: 18px; font-weight: 600; }
+  .stage ul { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
+  .code-ref { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink2); line-height: 1.7; overflow-wrap: anywhere; }
+  .code-ref b { font-weight: 500; color: var(--ink); }
+  @media (max-width: 640px) { .stage { grid-template-columns: minmax(0, 1fr); } }
+
+  .fail td:nth-child(2) { font-family: var(--font-mono); font-size: 13px; white-space: nowrap; color: var(--accent); }
+  .fail td:first-child { white-space: normal; }
+  /* Print: landscape A4, light colours, each diagram whole on one page. */
+  @page { size: A4 landscape; margin: 11mm 12mm; }
+  @media print {
+    /* Block layout, not grid: Chrome overlaps grid items that break across pages. */
+    :root { color-scheme: light; --bg: #ffffff; }
+    * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    body { padding: 0; font-size: 12.5px; }
+    .page, .route, .stages, figure, header, .route > header { display: block; }
+    .page > * + *, .route > * + * { margin-top: 14px; }
+    header > * + *, .route > header > * + * { margin-top: 4px; }
+    figure > figcaption { margin-top: 6px; max-width: none; }
+    .eyebrow { font-size: 10.5px; }
+    h1 { font-size: 22px; }
+    .lede { font-size: 13px; max-width: none; }
+    .prose { max-width: none; }
+    .diagram-scroll { padding: 4px; overflow: visible; }
+    .diagram-scroll svg { min-width: 0; width: auto; max-width: 100%; height: 128mm; margin: 0 auto; }
+    figure, .stage, tr, .two-col > section, .fail-section { break-inside: avoid; }
+    .two-col { break-before: page; }
+    .route { break-before: page; }
+    .stages { break-before: page; }
+    .fail-section { break-before: page; }
+    .stage { padding-block: 12px; }
+    .stage-body { max-width: none; }
+    figcaption { font-size: 11px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="page">
+  <header class="prose">
+    <div class="eyebrow">VoxPath · system map</div>
+    <h1>How VoxPath answers a question</h1>
+    <p class="lede">A Next.js chat app talks to one FastAPI backend. Inside it, a LangGraph agent lets gpt-4o-mini choose among 14 tools for stocks, trains, news and memory, then answers from what the tools return.</p>
+  </header>
+
+  <figure>
+    <div class="diagram-scroll">
+      <svg viewBox="0 0 1200 770" role="img" aria-label="VoxPath architecture: the browser posts a question to the FastAPI backend; its LangGraph agent asks OpenAI which tool to call, runs tools for stocks, railways, news and memory, and answers. Conversations, memories and logs live in Neon Postgres; news is crawled into files every five minutes; every turn is traced to Phoenix.">
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" class="ah"/>
+          </marker>
+          <marker id="ah-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" class="ah-a"/>
+          </marker>
+        </defs>
+
+        <!-- Backend zone -->
+        <rect x="240" y="40" width="665" height="470" rx="12" class="zone"/>
+        <text x="258" y="64" class="t-zone">FastAPI backend · port 8000</text>
+
+        <!-- Browser -->
+        <rect x="20" y="110" width="170" height="180" rx="8" class="box"/>
+        <text x="105" y="140" text-anchor="middle" class="t-title">Browser</text>
+        <text x="105" y="163" text-anchor="middle" class="t-body">Next.js app</text>
+        <text x="105" y="181" text-anchor="middle" class="t-mono">port 3000</text>
+        <text x="105" y="216" text-anchor="middle" class="t-body">chat + saved chats</text>
+        <text x="105" y="235" text-anchor="middle" class="t-body">edit · copy · rate</text>
+        <text x="105" y="254" text-anchor="middle" class="t-body">sign-in token</text>
+
+        <!-- OpenAI -->
+        <rect x="20" y="370" width="170" height="100" rx="8" class="box"/>
+        <text x="105" y="398" text-anchor="middle" class="t-title">OpenAI API</text>
+        <text x="105" y="421" text-anchor="middle" class="t-mono">gpt-4o-mini</text>
+        <text x="105" y="441" text-anchor="middle" class="t-body">+ embeddings for memory</text>
+
+        <!-- API routes -->
+        <rect x="265" y="85" width="315" height="100" rx="8" class="box"/>
+        <text x="422" y="112" text-anchor="middle" class="t-title">API routes</text>
+        <text x="422" y="137" text-anchor="middle" class="t-mono">/auth  /chat  /conversations  /feedback</text>
+        <text x="422" y="162" text-anchor="middle" class="t-body">checks token · rate limit · 4,000-char cap</text>
+
+        <!-- Agent -->
+        <rect x="265" y="255" width="315" height="240" rx="8" class="box-accent"/>
+        <text x="422" y="285" text-anchor="middle" class="t-title">LangGraph agent</text>
+        <text x="422" y="316" text-anchor="middle" class="t-body">model picks a tool, reads the result,</text>
+        <text x="422" y="334" text-anchor="middle" class="t-body">repeats until it can answer</text>
+        <text x="422" y="368" text-anchor="middle" class="t-body">history trimmed to a token budget</text>
+        <text x="422" y="392" text-anchor="middle" class="t-body">system prompt stamped with a version</text>
+        <text x="422" y="416" text-anchor="middle" class="t-body">“don’t remember me” blocks saves</text>
+        <text x="422" y="440" text-anchor="middle" class="t-body">editing a message rewinds the chat</text>
+
+        <!-- Tools zone -->
+        <rect x="640" y="80" width="245" height="405" rx="10" class="zone-dashed"/>
+        <text x="655" y="102" class="t-zone">MCP tools · same process</text>
+
+        <rect x="655" y="115" width="215" height="80" rx="8" class="box"/>
+        <text x="762" y="142" text-anchor="middle" class="t-title">Stock price</text>
+        <text x="762" y="162" text-anchor="middle" class="t-mono">get_stock_price</text>
+        <text x="762" y="181" text-anchor="middle" class="t-body">Hindi names → NSE symbol</text>
+
+        <rect x="655" y="205" width="215" height="80" rx="8" class="box"/>
+        <text x="762" y="232" text-anchor="middle" class="t-title">Railways · 7 tools</text>
+        <text x="762" y="252" text-anchor="middle" class="t-mono">get_pnr_status, search_trains…</text>
+        <text x="762" y="271" text-anchor="middle" class="t-body">PNR, live status, seats, fares</text>
+
+        <rect x="655" y="295" width="215" height="80" rx="8" class="box"/>
+        <text x="762" y="322" text-anchor="middle" class="t-title">News</text>
+        <text x="762" y="342" text-anchor="middle" class="t-mono">get_latest_news</text>
+        <text x="762" y="361" text-anchor="middle" class="t-body">region · category · topic · language</text>
+
+        <rect x="655" y="385" width="215" height="80" rx="8" class="box"/>
+        <text x="762" y="412" text-anchor="middle" class="t-title">Memory · 5 tools</text>
+        <text x="762" y="432" text-anchor="middle" class="t-mono">save / search / update…</text>
+        <text x="762" y="451" text-anchor="middle" class="t-body">facts you told it, per user</text>
+
+        <!-- External services -->
+        <rect x="945" y="115" width="235" height="80" rx="8" class="box"/>
+        <text x="1062" y="145" text-anchor="middle" class="t-title">Yahoo Finance</text>
+        <text x="1062" y="167" text-anchor="middle" class="t-body">+ NSE company list</text>
+
+        <rect x="945" y="205" width="235" height="80" rx="8" class="box"/>
+        <text x="1062" y="235" text-anchor="middle" class="t-title">IRCTC via RapidAPI</text>
+        <text x="1062" y="257" text-anchor="middle" class="t-body">live railway data</text>
+
+        <rect x="945" y="295" width="235" height="80" rx="8" class="box"/>
+        <text x="1062" y="325" text-anchor="middle" class="t-title">Saved headlines</text>
+        <text x="1062" y="347" text-anchor="middle" class="t-mono">JSONL files on disk</text>
+
+        <rect x="945" y="600" width="235" height="80" rx="8" class="box"/>
+        <text x="1062" y="630" text-anchor="middle" class="t-title">News websites</text>
+        <text x="1062" y="652" text-anchor="middle" class="t-body">34 sources · English + Hindi</text>
+
+        <!-- Postgres -->
+        <rect x="240" y="570" width="665" height="170" rx="12" class="zone"/>
+        <text x="258" y="594" class="t-zone">Neon Postgres · cloud</text>
+
+        <rect x="260" y="608" width="145" height="112" rx="8" class="box"/>
+        <text x="332" y="638" text-anchor="middle" class="t-mono">users · threads</text>
+        <text x="332" y="662" text-anchor="middle" class="t-body">accounts and</text>
+        <text x="332" y="680" text-anchor="middle" class="t-body">who owns each chat</text>
+
+        <rect x="415" y="608" width="145" height="112" rx="8" class="box"/>
+        <text x="487" y="638" text-anchor="middle" class="t-mono">checkpoints</text>
+        <text x="487" y="662" text-anchor="middle" class="t-body">full message history</text>
+        <text x="487" y="680" text-anchor="middle" class="t-body">of every chat</text>
+
+        <rect x="570" y="608" width="145" height="112" rx="8" class="box"/>
+        <text x="642" y="638" text-anchor="middle" class="t-mono">chat_messages</text>
+        <text x="642" y="662" text-anchor="middle" class="t-body">tool_calls, feedback,</text>
+        <text x="642" y="680" text-anchor="middle" class="t-body">tokens and cost</text>
+
+        <rect x="725" y="608" width="145" height="112" rx="8" class="box"/>
+        <text x="797" y="638" text-anchor="middle" class="t-mono">memories</text>
+        <text x="797" y="662" text-anchor="middle" class="t-body">facts + embeddings</text>
+        <text x="797" y="680" text-anchor="middle" class="t-body">per user</text>
+
+        <!-- Phoenix and evals -->
+        <rect x="20" y="570" width="170" height="82" rx="8" class="box"/>
+        <text x="105" y="598" text-anchor="middle" class="t-title">Phoenix</text>
+        <text x="105" y="619" text-anchor="middle" class="t-mono">port 6006</text>
+        <text x="105" y="638" text-anchor="middle" class="t-body">a trace per turn</text>
+
+        <rect x="20" y="684" width="170" height="66" rx="8" class="zone-dashed"/>
+        <text x="105" y="710" text-anchor="middle" class="t-title">Eval suite</text>
+        <text x="105" y="731" text-anchor="middle" class="t-body">46 test chats + judges</text>
+
+        <!-- The path of one question (accent) -->
+        <line x1="190" y1="128" x2="262" y2="128" class="flow-accent" marker-end="url(#ah-a)"/>
+        <text x="227" y="120" text-anchor="middle" class="t-label-accent">POST /chat</text>
+        <line x1="265" y1="166" x2="193" y2="166" class="flow-accent" marker-end="url(#ah-a)"/>
+        <text x="229" y="158" text-anchor="middle" class="t-label-accent">answer</text>
+
+        <line x1="422" y1="185" x2="422" y2="252" class="flow-accent" marker-end="url(#ah-a)"/>
+        <text x="432" y="223" class="t-label-accent">message + chat id</text>
+
+        <line x1="265" y1="405" x2="193" y2="405" class="flow-accent" marker-end="url(#ah-a)"/>
+        <text x="229" y="397" text-anchor="middle" class="t-label-accent">prompt</text>
+        <line x1="190" y1="440" x2="262" y2="440" class="flow-accent" marker-end="url(#ah-a)"/>
+        <text x="227" y="432" text-anchor="middle" class="t-label-accent">tool call / reply</text>
+
+        <line x1="580" y1="330" x2="637" y2="330" class="flow-accent" marker-end="url(#ah-a)"/>
+        <text x="610" y="322" text-anchor="middle" class="t-label-accent">run tool</text>
+        <line x1="640" y1="365" x2="583" y2="365" class="flow-accent" marker-end="url(#ah-a)"/>
+        <text x="610" y="357" text-anchor="middle" class="t-label-accent">result</text>
+
+        <!-- Reads and writes around it (grey) -->
+        <line x1="870" y1="155" x2="942" y2="155" class="flow" marker-end="url(#ah)"/>
+        <text x="907" y="147" text-anchor="middle" class="t-label">price</text>
+        <line x1="870" y1="245" x2="942" y2="245" class="flow" marker-end="url(#ah)"/>
+        <text x="907" y="237" text-anchor="middle" class="t-label">train data</text>
+        <line x1="870" y1="335" x2="942" y2="335" class="flow" marker-end="url(#ah)"/>
+        <text x="907" y="327" text-anchor="middle" class="t-label">reads</text>
+
+        <line x1="1062" y1="600" x2="1062" y2="378" class="flow" marker-end="url(#ah)"/>
+        <text x="1072" y="474" class="t-label">crawled every</text>
+        <text x="1072" y="489" class="t-label">5 min by the</text>
+        <text x="1072" y="504" class="t-label">backend scheduler</text>
+
+        <line x1="332" y1="510" x2="332" y2="605" class="flow" marker-end="url(#ah)"/>
+        <text x="340" y="545" class="t-label">sign-in, chat list</text>
+        <line x1="487" y1="495" x2="487" y2="605" class="flow" marker-end="url(#ah)"/>
+        <text x="494" y="560" class="t-label">load / save chat</text>
+        <line x1="605" y1="510" x2="605" y2="605" class="flow" marker-end="url(#ah)"/>
+        <text x="612" y="545" class="t-label">log each turn</text>
+        <line x1="762" y1="465" x2="762" y2="605" class="flow" marker-end="url(#ah)"/>
+        <text x="770" y="545" class="t-label">save / search</text>
+
+        <polyline points="265,480 215,480 215,535 105,535 105,567" class="flow" marker-end="url(#ah)"/>
+        <text x="160" y="527" text-anchor="middle" class="t-label">traces</text>
+        <line x1="105" y1="684" x2="105" y2="655" class="flow" marker-end="url(#ah)"/>
+        <text x="113" y="673" class="t-label">experiments</text>
+      </svg>
+    </div>
+    <figcaption>
+      <span class="swatch"></span>Saffron arrows are the path of one question, from the browser to the model and tools and back.
+      <span class="swatch grey"></span>Grey arrows are the reads and writes around it. The tools run inside the backend process; only the boxes on the far right and OpenAI are outside services.
+    </figcaption>
+  </figure>
+
+  <div class="two-col">
+    <section>
+      <h2>One question, step by step</h2>
+      <ol class="steps">
+        <li><div><strong>You ask</strong> “top political news from Bihar”. The browser posts it to <code>/chat</code> with your sign-in token and the chat’s id.</div></li>
+        <li><div><strong>The backend checks</strong> the token, your rate limit and the message length, and records that this chat is yours.</div></li>
+        <li><div><strong>The agent loads the chat</strong> from Postgres and sends it, with the system prompt, to gpt-4o-mini.</div></li>
+        <li><div><strong>The model picks a tool</strong>: <code>get_latest_news(region="Bihar", category="politics")</code>.</div></li>
+        <li><div><strong>The news tool searches</strong> the headlines the crawler saved in the last 72 hours and returns five, each with its link.</div></li>
+        <li><div><strong>The model writes the answer</strong> from that result, and the agent saves the updated chat.</div></li>
+        <li><div><strong>The backend replies</strong> and logs the turn (tools, tokens, cost, time). Phoenix receives the whole trace.</div></li>
+      </ol>
+    </section>
+
+    <section>
+      <h2>Where things are kept</h2>
+      <div class="stores-wrap">
+        <table class="stores">
+          <thead><tr><th>What</th><th>Where</th></tr></thead>
+          <tbody>
+            <tr><td>Chats</td><td>Postgres checkpoints; the sidebar lists them from <code>threads</code></td></tr>
+            <tr><td>Your facts</td><td>Postgres memory store, searched by meaning with embeddings</td></tr>
+            <tr><td>Headlines</td><td>JSONL files on the backend’s disk, refreshed every 5 minutes</td></tr>
+            <tr><td>Turn logs</td><td><code>chat_messages</code>, <code>tool_calls</code>, <code>message_feedback</code></td></tr>
+            <tr><td>Traces</td><td>Phoenix’s own database on your machine (<code>tracing/data</code>)</td></tr>
+            <tr><td>Test chats</td><td><code>backend/evals/cases.jsonl</code>; results in <code>evals/results</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <section class="route" aria-labelledby="route-title">
+    <header class="prose">
+      <div class="eyebrow">Hop by hop</div>
+      <h2 id="route-title" style="font-size: clamp(24px, 3vw, 30px); margin: 0;">The full route of one message</h2>
+      <p class="lede">Every call your question causes, in the order it happens. The numbers in the diagram match the stages below, which name the code that does each step.</p>
+    </header>
+
+    <figure>
+      <div class="diagram-scroll">
+        <svg viewBox="0 0 1200 800" role="img" aria-label="Sequence of one chat turn: the browser posts to the API, which checks the token and claims the chat in Postgres, then calls the agent. The agent loads the chat, trims it, and loops with OpenAI and the tools until the model answers. It saves the chat, sends traces to Phoenix and returns the reply; the API answers the browser and logs the turn in the background, and the browser refreshes the chat list.">
+          <defs>
+            <marker id="sq-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" class="ah"/>
+            </marker>
+            <marker id="sq-ah-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" class="ah-a"/>
+            </marker>
+          </defs>
+
+          <!-- Lanes -->
+          <rect x="10" y="16" width="120" height="40" rx="8" class="box"/><text x="70" y="41" text-anchor="middle" class="t-lane">Browser</text>
+          <rect x="180" y="16" width="120" height="40" rx="8" class="box"/><text x="240" y="41" text-anchor="middle" class="t-lane">API routes</text>
+          <rect x="360" y="16" width="120" height="40" rx="8" class="box-accent"/><text x="420" y="41" text-anchor="middle" class="t-lane">Agent</text>
+          <rect x="540" y="16" width="120" height="40" rx="8" class="box"/><text x="600" y="41" text-anchor="middle" class="t-lane">OpenAI</text>
+          <rect x="710" y="16" width="120" height="40" rx="8" class="box"/><text x="770" y="41" text-anchor="middle" class="t-lane">Tool</text>
+          <rect x="880" y="16" width="120" height="40" rx="8" class="box"/><text x="940" y="41" text-anchor="middle" class="t-lane">Postgres</text>
+          <rect x="1050" y="16" width="120" height="40" rx="8" class="box"/><text x="1110" y="41" text-anchor="middle" class="t-lane">Phoenix</text>
+
+          <line x1="70" y1="56" x2="70" y2="790" class="lifeline"/>
+          <line x1="240" y1="56" x2="240" y2="790" class="lifeline"/>
+          <line x1="420" y1="56" x2="420" y2="790" class="lifeline"/>
+          <line x1="600" y1="56" x2="600" y2="790" class="lifeline"/>
+          <line x1="770" y1="56" x2="770" y2="790" class="lifeline"/>
+          <line x1="940" y1="56" x2="940" y2="790" class="lifeline"/>
+          <line x1="1110" y1="56" x2="1110" y2="790" class="lifeline"/>
+
+          <!-- The model-and-tools loop -->
+          <rect x="398" y="303" width="394" height="228" rx="6" class="frame"/>
+          <text x="786" y="318" text-anchor="end" class="t-label-accent">loop until a reply has no tool call</text>
+
+          <!-- 1 -->
+          <line x1="70" y1="100" x2="237" y2="100" class="flow-accent" marker-end="url(#sq-ah-a)"/>
+          <text x="155" y="93" text-anchor="middle" class="t-label-accent">1 · POST /chat + token</text>
+          <!-- 2 -->
+          <rect x="248" y="125" width="164" height="26" rx="5" class="note"/>
+          <text x="256" y="142" class="t-note">2 · token, rate limit, size</text>
+          <!-- 3 -->
+          <line x1="240" y1="176" x2="937" y2="176" class="flow" marker-end="url(#sq-ah)"/>
+          <text x="590" y="169" text-anchor="middle" class="t-label">3 · claim the chat (threads row)</text>
+          <!-- 4 -->
+          <line x1="240" y1="214" x2="417" y2="214" class="flow-accent" marker-end="url(#sq-ah-a)"/>
+          <text x="330" y="207" text-anchor="middle" class="t-label-accent">4 · agent_chat()</text>
+          <!-- 5 -->
+          <line x1="420" y1="252" x2="937" y2="252" class="flow" marker-end="url(#sq-ah)"/>
+          <text x="680" y="245" text-anchor="middle" class="t-label">5 · load this chat’s history (checkpoint)</text>
+          <!-- 6 -->
+          <rect x="428" y="270" width="164" height="26" rx="5" class="note"/>
+          <text x="436" y="287" class="t-note">6 · trim to 3,000 tokens</text>
+          <!-- 7 -->
+          <line x1="420" y1="340" x2="597" y2="340" class="flow-accent" marker-end="url(#sq-ah-a)"/>
+          <text x="510" y="333" text-anchor="middle" class="t-label-accent">7 · prompt + history + tools</text>
+          <!-- 8 -->
+          <line x1="600" y1="378" x2="423" y2="378" class="flow-accent" marker-end="url(#sq-ah-a)"/>
+          <text x="510" y="371" text-anchor="middle" class="t-label-accent">8 · “call get_latest_news”</text>
+          <!-- 9 -->
+          <line x1="420" y1="416" x2="767" y2="416" class="flow-accent" marker-end="url(#sq-ah-a)"/>
+          <text x="680" y="409" text-anchor="middle" class="t-label-accent">9 · run the tool with its arguments</text>
+          <!-- 10 -->
+          <line x1="770" y1="454" x2="423" y2="454" class="flow-accent" marker-end="url(#sq-ah-a)"/>
+          <text x="680" y="447" text-anchor="middle" class="t-label-accent">10 · result: headlines + links</text>
+          <!-- 11 -->
+          <line x1="420" y1="492" x2="597" y2="492" class="flow-accent" marker-end="url(#sq-ah-a)"/>
+          <text x="510" y="485" text-anchor="middle" class="t-label-accent">11 · history + tool result</text>
+          <!-- 12 -->
+          <line x1="600" y1="522" x2="423" y2="522" class="flow-accent" marker-end="url(#sq-ah-a)"/>
+          <text x="510" y="515" text-anchor="middle" class="t-label-accent">12 · final answer text</text>
+          <!-- 13 -->
+          <line x1="420" y1="568" x2="937" y2="568" class="flow" marker-end="url(#sq-ah)"/>
+          <text x="680" y="561" text-anchor="middle" class="t-label">13 · save the whole chat, once</text>
+          <!-- 14 -->
+          <line x1="420" y1="606" x2="1107" y2="606" class="flow-dashed" marker-end="url(#sq-ah)"/>
+          <text x="860" y="599" text-anchor="middle" class="t-label">14 · trace spans, sent in the background</text>
+          <!-- 15 -->
+          <line x1="420" y1="644" x2="243" y2="644" class="flow-accent" marker-end="url(#sq-ah-a)"/>
+          <text x="330" y="637" text-anchor="middle" class="t-label-accent">15 · reply text</text>
+          <!-- 16 -->
+          <line x1="240" y1="682" x2="73" y2="682" class="flow-accent" marker-end="url(#sq-ah-a)"/>
+          <text x="155" y="675" text-anchor="middle" class="t-label-accent">16 · 200 {text, turn_id}</text>
+          <!-- 17 -->
+          <line x1="240" y1="720" x2="937" y2="720" class="flow-dashed" marker-end="url(#sq-ah)"/>
+          <text x="590" y="713" text-anchor="middle" class="t-label">17 · log the turn, after the reply has gone</text>
+          <!-- 18 -->
+          <line x1="70" y1="762" x2="237" y2="762" class="flow" marker-end="url(#sq-ah)"/>
+          <text x="155" y="755" text-anchor="middle" class="t-label">18 · GET /conversations</text>
+        </svg>
+      </div>
+      <figcaption>
+        <span class="swatch"></span>Saffron is your question and its answer.
+        <span class="swatch grey"></span>Grey is bookkeeping around it; dashed grey happens in the background and never makes you wait.
+        Steps 7 to 12 repeat once per tool round: a news question takes one round, a railway fare usually takes two (find the station codes, then the fare).
+      </figcaption>
+    </figure>
+
+    <div class="stages">
+      <article class="stage">
+        <div class="stage-tag">STEP 1</div>
+        <div class="stage-body">
+          <h3>In the browser</h3>
+          <p>When you press Enter, <code>sendTextMessage</code> puts your message on screen at once, then calls <code>authFetch('/chat')</code>. That adds your sign-in token as an <code>Authorization: Bearer</code> header. The body carries the message and the chat’s id: a new chat gets a fresh UUID on its first message, and an edit also sends <code>edit_index</code> and <code>edit_original</code>.</p>
+          <div class="code-ref"><b>frontend/src/components/ChatInterface.tsx</b> · sendTextMessage<br><b>frontend/src/lib/auth.ts</b> · authFetch</div>
+        </div>
+      </article>
+
+      <article class="stage">
+        <div class="stage-tag">STEPS 2–3</div>
+        <div class="stage-body">
+          <h3>Through the backend’s front door</h3>
+          <p>CORS lets only the app at <code>localhost:3000</code> call the API from a browser. A middleware gives the request a log id and times it. FastAPI then runs the route’s checks in order:</p>
+          <ul>
+            <li><code>current_user</code> verifies the token’s signature with <code>JWT_SECRET</code> and gives the user. This is the only place a user id comes from; nothing the browser sends can claim to be someone else.</li>
+            <li><code>limit_chat</code> allows 30 chats a minute per user.</li>
+            <li><code>chat_endpoint</code> refuses an empty message, one over 4,000 characters, or a malformed chat id.</li>
+            <li><code>claim_thread</code> writes one <code>threads</code> row in a single SQL statement: it claims a new chat for you, or touches one you own. A chat owned by someone else gets 404, so its existence isn’t even confirmed.</li>
+          </ul>
+          <div class="code-ref"><b>backend/main.py</b> · trace_requests, chat_endpoint<br><b>backend/auth.py</b> · current_user, claim_thread<br><b>backend/ratelimit.py</b> · limit_chat</div>
+        </div>
+      </article>
+
+      <article class="stage">
+        <div class="stage-tag">STEPS 4–6</div>
+        <div class="stage-body">
+          <h3>Into the agent</h3>
+          <p><code>chat_endpoint</code> opens a turn record, which collects every tool call and token count, and calls <code>agent_chat</code>. That builds a config with two ids: <code>thread_id</code> says which chat, <code>user_id</code> says whose memories. It opens the Phoenix trace with your session, user, prompt version and model, then hands your message to the LangGraph agent.</p>
+          <p>LangGraph loads the chat’s checkpoint from Postgres and adds your message. Before every model call, the pre-model hook:</p>
+          <ul>
+            <li>applies any “don’t remember me” request found anywhere in the chat, so memory saves are refused for the whole turn;</li>
+            <li>shortens tool results over 6,000 characters;</li>
+            <li>keeps the newest messages that fit in 3,000 tokens, always starting at one of your messages so no tool result loses its call.</li>
+          </ul>
+          <p>Only what the model sees is trimmed. The saved chat keeps everything.</p>
+          <div class="code-ref"><b>backend/agent.py</b> · agent_chat, _build_pre_model_hook, record_turn</div>
+        </div>
+      </article>
+
+      <article class="stage">
+        <div class="stage-tag">STEPS 7–12</div>
+        <div class="stage-body">
+          <h3>The model-and-tools loop</h3>
+          <p>The agent is a graph with two nodes. The <em>model</em> node sends the system prompt, the trimmed history and the descriptions of all 14 tools to gpt-4o-mini. If the reply asks for tools, the <em>tools</em> node runs each one, adds its result to the history, and the model node runs again. The first reply without a tool call is the answer.</p>
+          <p>No code routes by keywords. The model reads the system prompt and the tool descriptions and picks the tool and its arguments; that is why the Bihar fix was a change to the description and the prompt. Each tool is wrapped so its arguments, result and time are logged and added to the turn record.</p>
+          <ul>
+            <li><strong>Stocks.</strong> <code>get_stock_price</code> gets the name as you typed it. Hindi is turned into Latin letters and matched by sound against the NSE company list; Yahoo Finance gives the price. The answer names the company, so a near-match is visible.</li>
+            <li><strong>Railways.</strong> City names go through <code>resolve_station_code</code> first. The other tools call IRCTC through RapidAPI; <code>search_trains</code> asks several station pairs at once and returns whatever arrived before its deadline.</li>
+            <li><strong>News.</strong> <code>get_latest_news</code> searches headlines already saved on disk, so no website is fetched during your chat. It filters by region, category, topic and language; if nothing matches, it relaxes one filter at a time and adds a note saying what wasn’t found.</li>
+            <li><strong>Memory.</strong> The five memory tools read your user id from the config, never from the model, so one user can’t reach another’s memories. Search works by meaning, using OpenAI embeddings stored in Postgres.</li>
+          </ul>
+          <div class="code-ref"><b>backend/agent.py</b> · _build_agent, _with_call_logging<br><b>backend/mcp_server.py</b> · tool definitions<br><b>backend/services.py</b>, <b>stock_resolver.py</b>, <b>railway.py</b>, <b>news_crawler.py</b> · search_news, <b>memory.py</b></div>
+        </div>
+      </article>
+
+      <article class="stage">
+        <div class="stage-tag">STEPS 13–17</div>
+        <div class="stage-body">
+          <h3>Saving and replying</h3>
+          <p>When the graph finishes, LangGraph saves the whole chat to Postgres in one write. Saving after every step used to add about 2 seconds to each answer. <code>agent_chat</code> adds the token counts and the Phoenix trace id to the turn record and returns the answer text.</p>
+          <p><code>chat_endpoint</code> replies <code>200</code> with the text and a <code>turn_id</code>. Only after the reply has gone does a background task write the logs: one <code>chat_messages</code> row with the question, answer, tools, tokens, cost, time, prompt version and trace id, and one <code>tool_calls</code> row per tool. Phoenix spans leave in batches in the background too, so a slow or stopped Phoenix never slows a chat.</p>
+          <div class="code-ref"><b>backend/agent.py</b> · agent_chat, _note_usage<br><b>backend/main.py</b> · recorded<br><b>backend/analytics.py</b> · record_turn<br><b>backend/tracing.py</b> · setup_tracing</div>
+        </div>
+      </article>
+
+      <article class="stage">
+        <div class="stage-tag">STEPS 16, 18</div>
+        <div class="stage-body">
+          <h3>Back in the browser</h3>
+          <p>The answer appears as Markdown, with links opening in a new tab and Copy and thumbs buttons under it. The page then asks <code>GET /conversations</code>, so a new chat appears in the sidebar and the open one moves to the top. A thumbs click posts <code>/feedback</code> with the <code>turn_id</code>; that row links your rating to the logged turn and its Phoenix trace.</p>
+          <div class="code-ref"><b>frontend/src/components/ChatInterface.tsx</b> · sendTextMessage, rateAnswer<br><b>backend/conversations.py</b> · list and open chats</div>
+        </div>
+      </article>
+    </div>
+
+    <section class="fail-section">
+      <h2>When a step fails</h2>
+      <div class="stores-wrap">
+        <table class="stores fail">
+          <thead><tr><th>What happened</th><th>Reply</th><th>What you see</th></tr></thead>
+          <tbody>
+            <tr><td>No token, or it expired</td><td>401</td><td>You are signed out and asked to sign in again</td></tr>
+            <tr><td>More than 30 chats in a minute</td><td>429</td><td>“Too many requests. Please wait N seconds”</td></tr>
+            <tr><td>Message over 4,000 characters, or a bad chat id</td><td>400</td><td>The reason, under the input box</td></tr>
+            <tr><td>Someone else’s chat, or one you hid</td><td>404</td><td>The chat leaves your list and a new one opens</td></tr>
+            <tr><td>The message you edited changed meanwhile</td><td>409</td><td>“Reopen the chat and try again”; nothing was changed</td></tr>
+            <tr><td>Database unreachable before the agent ran</td><td>503</td><td>“Reconnecting”, then one automatic resend</td></tr>
+            <tr><td>Database unreachable after the agent ran</td><td>503</td><td>Asked to retry yourself, since tools may already have run</td></tr>
+            <tr><td>OpenAI quota or rate limit</td><td>200</td><td>A short fallback answer; the turn is logged as an error</td></tr>
+            <tr><td>Anything else</td><td>500</td><td>“Something went wrong… (Reference: turn id)”; the full error is in the log and analytics</td></tr>
+            <tr><td>Backend not running</td><td>none</td><td>“Connection Error”, with the address it tried</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </section>
+</div>
+</body>
+</html>

@@ -73,7 +73,8 @@ CRITERIA:
     asked (e.g. no news from that region), the reply says so before showing them.
   NOT_ANSWERED - the reply answers a different question, gives general background instead
     of the requested figure or status, covers only part of a multi-part question without
-    saying so, presents unrelated results as if they matched, asks for information the
+    saying so, presents unrelated results as if they matched (one off-topic item in a list
+    is enough, e.g. a cricket story among "business headlines"), asks for information the
     user already gave earlier in the conversation, or is evasive.
   Judge relevance only. Do not judge whether facts or numbers are correct: other checks
   compare them with the tool results.

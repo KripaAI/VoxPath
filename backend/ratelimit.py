@@ -72,6 +72,8 @@ class RateLimiter:
 
 login_limiter = RateLimiter("login", "LOGIN_RATE_LIMIT", "10/60")
 register_limiter = RateLimiter("register", "REGISTER_RATE_LIMIT", "10/3600")
+# Asking for a code and trying one, per IP (each code also allows only 5 guesses).
+reset_limiter = RateLimiter("reset", "RESET_RATE_LIMIT", "10/900")
 chat_limiter = RateLimiter("chat", "CHAT_RATE_LIMIT", "30/60")
 # Direct tool calls over /mcp (only when MCP_HTTP_ENABLED=true): each one can hit a paid
 # API (RapidAPI) or start a news crawl, so they are limited per user like chat.
@@ -88,6 +90,10 @@ def limit_login(request: Request) -> None:
 
 def limit_register(request: Request) -> None:
     register_limiter.check(_client_ip(request))
+
+
+def limit_reset(request: Request) -> None:
+    reset_limiter.check(_client_ip(request))
 
 
 def limit_chat(user: auth.User = Depends(auth.current_user)) -> None:

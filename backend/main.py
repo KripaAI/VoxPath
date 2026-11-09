@@ -199,9 +199,11 @@ def _internal_error_message(reference: str) -> str:
 
 class ChatRequest(BaseModel):
     message: str | None = None
-
-
     thread_id: str | None = None
+    # Edit one of the user's earlier messages in this chat instead of adding a new
+    # one: its position among their messages (0 = first), and its old text as a check.
+    edit_index: int | None = Field(default=None, ge=0, le=10_000)
+    edit_original: str | None = Field(default=None, max_length=MAX_MESSAGE_CHARS)
 
 
 def is_quota_error(error: Exception) -> bool:
@@ -273,6 +275,37 @@ async def login_endpoint(creds: auth.LoginRequest, request: Request):
         ))
         raise
     analytics.spawn(analytics.record_auth_event("login_ok", username_tried=tried, user_id=result.user.id, client_ip=ip))
+    return result
+
+
+@app.post("/auth/forgot-password", status_code=202, dependencies=[Depends(ratelimit.limit_reset)])
+async def forgot_password_endpoint(req: auth.ForgotPasswordRequest, request: Request):
+    """Issue a one-time reset code. Same answer whether or not the account exists."""
+    ip = request.client.host if request.client else None
+    tried = req.username.strip().lower()
+    user_id = await auth.request_password_reset(tried)
+    analytics.spawn(analytics.record_auth_event(
+        "reset_requested", username_tried=tried, user_id=user_id,
+        reason=None if user_id else "unknown user", client_ip=ip,
+    ))
+    return {
+        "message": "If that account exists, a reset code has been issued. "
+                   "It is shown in the VoxPath backend window and in backend/logs/voxpath.log.",
+        "valid_minutes": auth.RESET_CODE_MINUTES,
+    }
+
+
+@app.post("/auth/reset-password", response_model=auth.TokenResponse, dependencies=[Depends(ratelimit.limit_reset)])
+async def reset_password_endpoint(req: auth.ResetPasswordRequest, request: Request):
+    """Set a new password with a valid reset code; signs the user in."""
+    ip = request.client.host if request.client else None
+    tried = req.username.strip().lower()
+    try:
+        result = await auth.reset_password(req)
+    except auth.ResetFailed as refused:
+        analytics.spawn(analytics.record_auth_event("reset_failed", username_tried=tried, reason=refused.reason, client_ip=ip))
+        raise
+    analytics.spawn(analytics.record_auth_event("reset_ok", username_tried=tried, user_id=result.user.id, client_ip=ip))
     return result
 
 
@@ -387,11 +420,22 @@ async def chat_endpoint(request: ChatRequest, user: auth.User = Depends(auth.cur
                 ),
             )
 
+        edit = {}
+        if request.edit_index is not None:
+            edit = {"edit_index": request.edit_index, "edit_original": request.edit_original}
+            log.info("chat edit of message %d on thread %s", request.edit_index, thread_id)
+
         try:
             with agent.record_turn() as turn:
                 text_content = await agent.agent_chat(
-                    user_text, thread_id=thread_id, user_id=user.id, username=user.username
+                    user_text, thread_id=thread_id, user_id=user.id, username=user.username, **edit
                 )
+        except agent.EditConflict as conflict:
+            # Checked before the agent runs, so nothing happened: no turn to record.
+            log.warning("chat edit refused on thread %s: %s", thread_id, conflict)
+            return JSONResponse(status_code=409, content={
+                "error": "That message can't be edited any more: the chat has changed. Reopen the chat and try again."
+            })
         except Exception as routing_error:
             if is_db_unavailable(routing_error):
                 # The agent may already have run (e.g. the final save failed), so a
